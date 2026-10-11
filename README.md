@@ -37,6 +37,21 @@ modern Linux distributions.
 The extractor creates the required `Worlds` and `Cutscenes` directories.
 Keep these directories beside the game executable.
 
+#### Windows installer
+
+`ProjectCane-QOL-v<version>-Setup.exe` (on this fork's
+[Releases page](https://github.com/Komasia/ProjectCane-QOL-Features-/releases))
+installs ProjectCane in one step:
+
+1. Run the installer. It installs for your user only, so it doesn't need
+   administrator rights.
+2. When asked, browse to your NTSC `.iso`.
+3. The installer extracts the game files from the ISO. It also adds Start
+   menu shortcuts and an uninstaller.
+
+The installer contains no game data. To build it yourself, see
+[`packaging/windows/README.md`](packaging/windows/README.md).
+
 ### Linux and Steam Deck
 
 1. Download and extract the complete Linux package into a normal writable
@@ -192,6 +207,11 @@ at build time, so external shader files are not required.
 
 The cross-platform extractor is the `File Extractor GUI` project in the same
 solution.
+
+The `File Extractor` project is the command-line extractor that the Windows
+installer uses. Build it as Release | x64 and it is written to
+`x64\Extractor\`. The installer script is
+[`packaging/windows/ProjectCane-Setup.nsi`](packaging/windows/ProjectCane-Setup.nsi).
 
 ### Windows with CMake
 
