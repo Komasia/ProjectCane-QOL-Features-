@@ -185,14 +185,17 @@ constexpr MUSICINFODisk MUSIC_TABLE[] =
     { "Sinking Peril",            0x37, 0xD3A9E, 0x77F08 },
 };
 
+// IBNK order of the release sound-bank table (0x244F40). These names must
+// match ProjectCane's kEffectBankNames (sound.cpp) and the GUI extractor;
+// the game loads IBNK n from the file named here.
 constexpr std::array<const char*, SOUND_BANK_COUNT> SOUND_BANK_NAMES =
 {
     "Common",
     "Intro",
-    "Snow",
     "Underwater",
     "Muggshot",
     "Voodoo",
+    "Snow",
     "Clockwerk",
 };
 

@@ -10,10 +10,17 @@
 #include <vector>
 
 #ifdef _WIN32
+// SPU2 hardware reverb (the PS2 sound chip's effect unit), run as an XAudio2
+// effect. The register presets come from the PS2 sound library (libsd); the
+// game selects one per world with snd_SetReverbType. Mode numbers are libsd's
+// SD_EFFECT_MODE_* values: 1 Room, 2 Studio A, 3 Studio B, 4 Studio C, 9 Pipe.
 class SpuStudioCReverb final : public IXAPO
 {
 public:
 	SpuStudioCReverb();
+
+	// Select the libsd preset and clear the work area, as sceSdSetEffectAttr does.
+	void SetMode(int sdMode);
 
 	STDMETHOD(QueryInterface)(REFIID interfaceId, void** result) override;
 	STDMETHOD_(ULONG, AddRef)() override;
@@ -38,7 +45,16 @@ public:
 private:
 	static constexpr int kTapCount = 39;
 	static constexpr int kRingSize = 64;
-	static constexpr int kEffectBufferSize = 0x100000 - 0xFC810;
+	static constexpr int kMaxEffectBufferSize = 0x1804 * 8; // largest libsd work area, in samples
+	struct Params
+	{
+		int apf1Size = 0, apf2Size = 0;
+		int vIir = 0, vComb1 = 0, vComb2 = 0, vComb3 = 0, vComb4 = 0, vWall = 0, vApf1 = 0, vApf2 = 0;
+		int sameDst[2]{}, comb1[2]{}, comb2[2]{}, sameSrc[2]{}, diffDst[2]{}, comb3[2]{}, comb4[2]{};
+		int diffSrc[2]{}, apf1Dst[2]{}, apf2Dst[2]{};
+		int vIn[2]{};
+	};
+	void LoadModeLocked(int sdMode);
 	static int Clamp16(int64_t value);
 	static int64_t MulQ15(int64_t left, int64_t right);
 	int EffectIndex(int offset) const;
@@ -47,6 +63,9 @@ private:
 	std::array<int, 2> ProcessFrame(int left, int right);
 
 	std::vector<short> m_effectBuffer;
+	int m_effectBufferSize = 1;
+	int m_mode = 4;
+	Params m_params{};
 	std::array<std::array<short, kRingSize * 2>, 2> m_down{};
 	std::array<std::array<short, kRingSize * 2>, 2> m_up{};
 	std::atomic<ULONG> m_references{1};
@@ -60,5 +79,6 @@ class SpuStudioCReverb
 {
 public:
 	void Reset() {}
+	void SetMode(int) {}
 };
 #endif

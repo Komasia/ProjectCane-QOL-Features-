@@ -61,6 +61,12 @@ struct EFFECTVOICE
     bool loop = false;
     bool envelopeExponential = false;
     bool envelopeDecreasing = false;
+    // 989SND tone flag 1: this voice also feeds the SPU2 reverb.
+    bool reverbSend = false;
+    // Volume held while the voice releases after StopSound (see
+    // s_releasingEffectVoices), and how many 240 Hz ticks it has released for.
+    float releaseVolume = 0.0f;
+    int releaseTicks = 0;
 };
 
 struct EFFECTLFO
@@ -414,7 +420,7 @@ void ActivateQueuedMusicSegments();
 void StepMusicSegment(MusicSegment& segment);
 bool DecodeEffectAdpcm(const EFFECTBANK& bank, uint32_t sampleOffset,
     DecodedEffectSample& decoded);
-void SetEffectVoicePan(IXAudio2SourceVoice* voice, int pan);
+void SetEffectVoicePan(IXAudio2SourceVoice* voice, int pan, bool reverbSend);
 int EffectSpatialPanDegrees(float pan);
 float EffectVoiceVolume(const EFFECTVOICE& active, float applicationVolume);
 void ConfigureEffectEnvelope(EFFECTVOICE& active);

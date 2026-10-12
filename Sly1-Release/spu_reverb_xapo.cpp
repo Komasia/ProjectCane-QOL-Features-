@@ -13,6 +13,46 @@ namespace
 		-616, 0, 266, 0, -103, 0, 35, 0, -10, 0, 2, 0, -1
 	};
 
+	// libsd (PS2 IOP sound library) effect presets, as reimplemented in
+	// ps2sdk's iop/sound/libsd/src/effect.c. Each row is 16 u32 words holding
+	// the 32 SPU2 effect registers (low half first). Work-area sizes are in
+	// units of 8 samples. Index = SD_EFFECT_MODE_*.
+	constexpr std::array<uint16_t, 10> kEffectSizes =
+		{ 0x1, 0x26C, 0x1F4, 0x484, 0x6FE, 0xADE, 0xF6C, 0x1804, 0x1804, 0x3C0 };
+	constexpr uint32_t kEffectParams[10][16] =
+	{
+		// OFF
+		{ 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00010001, 0x00000000, 0x00000000,
+		  0x00000000, 0x00010001, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },
+		// ROOM
+		{ 0x005B007D, 0x54B86D80, 0x0000BED0, 0xBA800000, 0x53005800, 0x033304D6, 0x022703F0, 0x01EF0374,
+		  0x01B70336, 0x01B60335, 0x01B50334, 0x01B50334, 0x01B50334, 0x013601B4, 0x005C00B8, 0x80008000 },
+		// STUDIO_1 (Studio A)
+		{ 0x00250033, 0x4FA870F0, 0x4410BCE0, 0x9C00C0F0, 0x4EC05280, 0x031B03E4, 0x02AF03A4, 0x02660372,
+		  0x025D031C, 0x018E025C, 0x0135022F, 0x00B701D2, 0x00B5018F, 0x008000B4, 0x0026004C, 0x80008000 },
+		// STUDIO_2 (Studio B)
+		{ 0x007F00B1, 0x4FA870F0, 0x4510BCE0, 0xB4C0BEF0, 0x4EC05280, 0x076B0904, 0x065F0824, 0x061607A2,
+		  0x05ED076C, 0x042E05EC, 0x0305050F, 0x02B70462, 0x0265042F, 0x01B20264, 0x00800100, 0x80008000 },
+		// STUDIO_3 (Studio C)
+		{ 0x00A900E3, 0x4FA86F60, 0x4510BCE0, 0xA680BEF0, 0x52C05680, 0x0B580DFB, 0x0A3C0D09, 0x09730BD9,
+		  0x08DA0B59, 0x05E908D9, 0x04B007EC, 0x03D206EF, 0x031D05EA, 0x0238031C, 0x00AA0154, 0x80008000 },
+		// HALL
+		{ 0x013901A5, 0x50006000, 0xB8004C00, 0xC000BC00, 0x5C006000, 0x11BB15BA, 0x10BD14C2, 0x0DC111BC,
+		  0x0DC311C0, 0x09C10DC0, 0x07C10BC4, 0x06CD0A00, 0x05C109C2, 0x041A05C0, 0x013A0274, 0x80008000 },
+		// SPACE
+		{ 0x0231033D, 0x50007E00, 0xB000B400, 0xB0004C00, 0x54006000, 0x1A311ED6, 0x183B1D14, 0x16B21BC2,
+		  0x15EF1A32, 0x105515EE, 0x0F2D1334, 0x0C5D11F6, 0x0AE11056, 0x07A20AE0, 0x02320464, 0x80008000 },
+		// ECHO (default delay/feedback)
+		{ 0x00030003, 0x7FFF7FFF, 0x00000000, 0x81000000, 0x00000000, 0x0FFD1FFD, 0x00091009, 0x00000000,
+		  0x00091009, 0x1FFF1FFF, 0x1FFE1FFE, 0x1FFE1FFE, 0x1FFE1FFE, 0x10041008, 0x00040008, 0x80008000 },
+		// DELAY (default delay)
+		{ 0x00030003, 0x7FFF7FFF, 0x00000000, 0x00000000, 0x00000000, 0x0FFD1FFD, 0x00091009, 0x00000000,
+		  0x00091009, 0x1FFF1FFF, 0x1FFE1FFE, 0x1FFE1FFE, 0x1FFE1FFE, 0x10041008, 0x00040008, 0x80008000 },
+		// PIPE
+		{ 0x00130017, 0x4FA870F0, 0x4510BCE0, 0x8500BEF0, 0x54C05F80, 0x02AF0371, 0x01DF02E5, 0x01D702B0,
+		  0x026A0358, 0x011E01D6, 0x00B1012D, 0x0059011F, 0x00E301A0, 0x00400058, 0x00140028, 0x80008000 },
+	};
+
 	XAPO_REGISTRATION_PROPERTIES MakeRegistration()
 	{
 		XAPO_REGISTRATION_PROPERTIES properties{};
@@ -58,8 +98,53 @@ namespace
 }
 
 SpuStudioCReverb::SpuStudioCReverb()
-	: m_effectBuffer(kEffectBufferSize, 0)
+	: m_effectBuffer(kMaxEffectBufferSize, 0)
 {
+	LoadModeLocked(4);
+}
+
+void SpuStudioCReverb::LoadModeLocked(const int sdMode)
+{
+	const int mode = (sdMode >= 0 && sdMode < static_cast<int>(kEffectSizes.size())) ? sdMode : 0;
+	uint16_t d[32];
+	for (int i = 0; i < 16; ++i)
+	{
+		d[i * 2] = static_cast<uint16_t>(kEffectParams[mode][i] & 0xFFFF);
+		d[i * 2 + 1] = static_cast<uint16_t>(kEffectParams[mode][i] >> 16);
+	}
+	// Address registers are written as value * 4 samples (SetEffectRegister:
+	// value << 2), volumes are signed Q15. Index [0] = left, [1] = right.
+	const auto a = [&](int i) { return static_cast<int>(d[i]) * 4; };
+	const auto v = [&](int i) { return static_cast<int>(static_cast<int16_t>(d[i])); };
+	Params p{};
+	p.apf1Size = a(0);  p.apf2Size = a(1);
+	p.vIir = v(2); p.vComb1 = v(3); p.vComb2 = v(4); p.vComb3 = v(5);
+	p.vComb4 = v(6); p.vWall = v(7); p.vApf1 = v(8); p.vApf2 = v(9);
+	p.sameDst[0] = a(10); p.sameDst[1] = a(11);   // IIR_DEST_A0/A1
+	p.comb1[0] = a(12);   p.comb1[1] = a(13);     // ACC_SRC_A0/A1
+	p.comb2[0] = a(14);   p.comb2[1] = a(15);     // ACC_SRC_B0/B1
+	p.sameSrc[0] = a(16); p.sameSrc[1] = a(17);   // IIR_SRC_A0/A1
+	p.diffDst[0] = a(18); p.diffDst[1] = a(19);   // IIR_DEST_B0/B1
+	p.comb3[0] = a(20);   p.comb3[1] = a(21);     // ACC_SRC_C0/C1
+	p.comb4[0] = a(22);   p.comb4[1] = a(23);     // ACC_SRC_D0/D1
+	// The hardware register order is IIR_SRC_B1 then IIR_SRC_B0, and each side
+	// reads the opposite side's diffusion source (as in PCSX2's DoReverb).
+	p.diffSrc[0] = a(24); p.diffSrc[1] = a(25);
+	p.apf1Dst[0] = a(26); p.apf1Dst[1] = a(27);   // MIX_DEST_A0/A1
+	p.apf2Dst[0] = a(28); p.apf2Dst[1] = a(29);   // MIX_DEST_B0/B1
+	p.vIn[0] = v(30);     p.vIn[1] = v(31);
+	m_params = p;
+	m_mode = mode;
+	m_effectBufferSize = (std::max)(1, static_cast<int>(kEffectSizes[mode]) * 8);
+}
+
+void SpuStudioCReverb::SetMode(const int sdMode)
+{
+	{
+		const std::lock_guard<std::mutex> lock(m_processMutex);
+		LoadModeLocked(sdMode);
+	}
+	Reset();
 }
 
 HRESULT SpuStudioCReverb::QueryInterface(const REFIID interfaceId, void** result)
@@ -175,8 +260,8 @@ int64_t SpuStudioCReverb::MulQ15(const int64_t left, const int64_t right)
 int SpuStudioCReverb::EffectIndex(const int offset) const
 {
 	const long long value = static_cast<long long>(m_cycle >> 1) + offset;
-	const long long wrapped = value % kEffectBufferSize;
-	return static_cast<int>(wrapped < 0 ? wrapped + kEffectBufferSize : wrapped);
+	const long long wrapped = value % m_effectBufferSize;
+	return static_cast<int>(wrapped < 0 ? wrapped + m_effectBufferSize : wrapped);
 }
 
 int SpuStudioCReverb::Downsample(const bool right) const
@@ -213,36 +298,36 @@ std::array<int, 2> SpuStudioCReverb::ProcessFrame(const int left, const int righ
 	m_down[1][m_ringPosition] = m_down[1][m_ringPosition | 64] = inputRight;
 
 	const bool processRight = (m_cycle & 1) != 0;
-	const int sameSource = EffectIndex(processRight ? 9064 : 11620);
-	const int sameDestination = EffectIndex(processRight ? 11616 : 14316);
-	const int samePrevious = EffectIndex((processRight ? 11616 : 14316) - 1);
-	const int diffSource = EffectIndex(processRight ? 3188 : 6056);
-	const int diffDestination = EffectIndex(processRight ? 6052 : 9060);
-	const int diffPrevious = EffectIndex((processRight ? 6052 : 9060) - 1);
-	const int comb1Source = EffectIndex(processRight ? 10480 : 13348);
-	const int comb2Source = EffectIndex(processRight ? 9676 : 12132);
-	const int comb3Source = EffectIndex(processRight ? 4800 : 8112);
-	const int comb4Source = EffectIndex(processRight ? 3912 : 7100);
-	const int apf1DestinationOffset = processRight ? 2272 : 3184;
-	const int apf2DestinationOffset = processRight ? 680 : 1360;
-	const int apf1Source = EffectIndex(apf1DestinationOffset - 908);
-	const int apf1Destination = EffectIndex(apf1DestinationOffset);
-	const int apf2Source = EffectIndex(apf2DestinationOffset - 676);
-	const int apf2Destination = EffectIndex(apf2DestinationOffset);
+	const int side = processRight ? 1 : 0;
+	const Params& p = m_params;
+	const int sameSource = EffectIndex(p.sameSrc[side]);
+	const int sameDestination = EffectIndex(p.sameDst[side]);
+	const int samePrevious = EffectIndex(p.sameDst[side] - 1);
+	const int diffSource = EffectIndex(p.diffSrc[side]);
+	const int diffDestination = EffectIndex(p.diffDst[side]);
+	const int diffPrevious = EffectIndex(p.diffDst[side] - 1);
+	const int comb1Source = EffectIndex(p.comb1[side]);
+	const int comb2Source = EffectIndex(p.comb2[side]);
+	const int comb3Source = EffectIndex(p.comb3[side]);
+	const int comb4Source = EffectIndex(p.comb4[side]);
+	const int apf1Source = EffectIndex(p.apf1Dst[side] - p.apf1Size);
+	const int apf1Destination = EffectIndex(p.apf1Dst[side]);
+	const int apf2Source = EffectIndex(p.apf2Dst[side] - p.apf2Size);
+	const int apf2Destination = EffectIndex(p.apf2Dst[side]);
 
-	const int64_t filteredInput = MulQ15(-32768, Downsample(processRight));
-	const int64_t same = MulQ15(28512, filteredInput + MulQ15(-22912, m_effectBuffer[sameSource]) -
+	const int64_t filteredInput = MulQ15(p.vIn[side], Downsample(processRight));
+	const int64_t same = MulQ15(p.vIir, filteredInput + MulQ15(p.vWall, m_effectBuffer[sameSource]) -
 		m_effectBuffer[samePrevious]) + m_effectBuffer[samePrevious];
-	const int64_t diff = MulQ15(28512, filteredInput + MulQ15(-22912, m_effectBuffer[diffSource]) -
+	const int64_t diff = MulQ15(p.vIir, filteredInput + MulQ15(p.vWall, m_effectBuffer[diffSource]) -
 		m_effectBuffer[diffPrevious]) + m_effectBuffer[diffPrevious];
-	int64_t output = MulQ15(20392, m_effectBuffer[comb1Source]) +
-		MulQ15(-17184, m_effectBuffer[comb2Source]) +
-		MulQ15(17680, m_effectBuffer[comb3Source]) +
-		MulQ15(-16656, m_effectBuffer[comb4Source]);
-	const int64_t apf1 = output - MulQ15(22144, m_effectBuffer[apf1Source]);
-	output = m_effectBuffer[apf1Source] + MulQ15(22144, apf1);
-	const int64_t apf2 = output - MulQ15(21184, m_effectBuffer[apf2Source]);
-	output = m_effectBuffer[apf2Source] + MulQ15(21184, apf2);
+	int64_t output = MulQ15(p.vComb1, m_effectBuffer[comb1Source]) +
+		MulQ15(p.vComb2, m_effectBuffer[comb2Source]) +
+		MulQ15(p.vComb3, m_effectBuffer[comb3Source]) +
+		MulQ15(p.vComb4, m_effectBuffer[comb4Source]);
+	const int64_t apf1 = output - MulQ15(p.vApf1, m_effectBuffer[apf1Source]);
+	output = m_effectBuffer[apf1Source] + MulQ15(p.vApf1, apf1);
+	const int64_t apf2 = output - MulQ15(p.vApf2, m_effectBuffer[apf2Source]);
+	output = m_effectBuffer[apf2Source] + MulQ15(p.vApf2, apf2);
 
 	m_effectBuffer[sameDestination] = static_cast<short>(Clamp16(same));
 	m_effectBuffer[diffDestination] = static_cast<short>(Clamp16(diff));

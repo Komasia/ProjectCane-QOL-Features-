@@ -65,6 +65,8 @@ static IXAudio2SubmixVoice* s_effectDryVoice = nullptr;
 static IXAudio2SubmixVoice* s_effectWetInputVoice = nullptr;
 static IXAudio2SubmixVoice* s_effectStudioCVoice = nullptr;
 static SpuStudioCReverb* s_effectStudioCProcessor = nullptr;
+// libsd mode last loaded into s_effectStudioCProcessor (-1 = none yet).
+static int s_effectSpuModeApplied = -1;
 static bool s_effectReverbCreationAttempted = false;
 static bool s_effectStudioCCreationAttempted = false;
 static std::atomic<bool> s_audioCriticalError{ false };
@@ -629,7 +631,10 @@ bool EnsureEffectReverb()
 		studio->Release();
 		ReportXAudioFailureOnce("Create Studio C reverb submix", studioResult);
 		if (SUCCEEDED(studioResult) && s_effectStudioCVoice)
+		{
 			s_effectStudioCProcessor = studio;
+			s_effectSpuModeApplied = -1;
+		}
 	}
 	#endif
 
@@ -713,6 +718,7 @@ void ResetEffectReverbProcessors()
 	if (s_effectStudioCVoice)
 	{
 		s_effectStudioCProcessor = nullptr;
+		s_effectSpuModeApplied = -1;
 		s_effectStudioCVoice->DestroyVoice();
 		s_effectStudioCVoice = nullptr;
 	}
@@ -720,10 +726,45 @@ void ResetEffectReverbProcessors()
 	s_effectStudioCCreationAttempted = false;
 }
 
+// Retail PushSwReverb/SetSwDefaultReverb call snd_SetReverbType(2, mode)
+// with mode = {0, 2, 3, 4, 9, 1}[rvrbk] (table at 0x274808 in SCUS_971.98),
+// i.e. libsd SD_EFFECT_MODE_* values, then snd_SetReverbDepth(2, depth,
+// depth) with the script's depth unchanged as the SPU2 effect volume (EVOL,
+// 0..0x7fff).
+static int SpuReverbModeForKind(REVERBK kind)
+{
+	switch (kind)
+	{
+	case REVERBK_StudioA: return 2;
+	case REVERBK_StudioB: return 3;
+	case REVERBK_StudioC: return 4;
+	case REVERBK_Pipe: return 9;
+	case REVERBK_Room: return 1;
+	default: return 0;
+	}
+}
+
 void ApplyCurrentEffectReverb()
 {
 	if (!s_effectReverbVoice && !s_effectStudioCVoice)
 		return;
+	const int sdMode = SpuReverbModeForKind(s_effectReverbKind);
+	// Every type the game uses runs through the SPU2 reverb emulation with its
+	// libsd preset. The XAudio2 I3DL2 reverb is only a fallback for when the
+	// SPU2 effect could not be created.
+	if (s_effectStudioCProcessor && sdMode != s_effectSpuModeApplied)
+	{
+		s_effectStudioCProcessor->SetMode(sdMode);
+		s_effectSpuModeApplied = sdMode;
+	}
+	const float wetLevel = sdMode == 0
+		? 0.0f
+		: std::clamp(static_cast<float>(s_effectReverbDepth) / 32768.0f, 0.0f, 1.0f);
+	const bool feedStudio = sdMode != 0 && s_effectStudioCVoice != nullptr;
+	const bool feedGeneric = sdMode != 0 && s_effectStudioCVoice == nullptr;
+	const float studioWetLevel = feedStudio ? wetLevel : 0.0f;
+	const float genericWetLevel = feedGeneric ? wetLevel : 0.0f;
+
 	static const XAUDIO2FX_REVERB_I3DL2_PARAMETERS presets[] =
 	{
 		XAUDIO2FX_I3DL2_PRESET_DEFAULT,
@@ -736,17 +777,6 @@ void ApplyCurrentEffectReverb()
 	const int preset = std::clamp(static_cast<int>(s_effectReverbKind),
 		static_cast<int>(REVERBK_None), static_cast<int>(REVERBK_Max) - 1);
 	XAUDIO2FX_REVERB_I3DL2_PARAMETERS i3dl2 = presets[preset];
-	// The game's authored reverb depth is a 0..127 value. Keep this auxiliary
-	// path fully wet and apply that depth to the reverb return; mixing dry signal
-	// inside the effect would duplicate the source voice's direct path.
-	const float studioWetLevel = s_effectReverbKind == REVERBK_StudioC
-		? std::clamp(static_cast<float>(s_effectReverbDepth) / 32768.0f, 0.0f, 1.0f)
-		: 0.0f;
-	const float genericWetLevel = s_effectReverbKind == REVERBK_None
-		? 0.0f
-		: s_effectReverbKind == REVERBK_StudioC
-			? (s_effectStudioCVoice ? 0.0f : studioWetLevel)
-			: std::clamp(static_cast<float>(s_effectReverbDepth) / 127.0f, 0.0f, 1.0f);
 	i3dl2.WetDryMix = 100.0f;
 	XAUDIO2FX_REVERB_PARAMETERS native{};
 	ReverbConvertI3DL2ToNative(&i3dl2, &native, FALSE);
@@ -756,10 +786,6 @@ void ApplyCurrentEffectReverb()
 		? s_effectReverbVoice->SetVolume(genericWetLevel) : S_OK;
 	const HRESULT studioVolumeResult = s_effectStudioCVoice
 		? s_effectStudioCVoice->SetVolume(studioWetLevel) : S_OK;
-	const bool feedStudio = s_effectReverbKind == REVERBK_StudioC &&
-		s_effectStudioCVoice != nullptr;
-	const bool feedGeneric = s_effectReverbKind != REVERBK_None &&
-		(s_effectReverbKind != REVERBK_StudioC || s_effectStudioCVoice == nullptr);
 	const float studioInputMatrix[4] =
 	{
 		feedStudio ? 1.0f : 0.0f, 0.0f,
@@ -784,7 +810,7 @@ void ApplyCurrentEffectReverb()
 			static_cast<unsigned>(parametersResult), static_cast<unsigned>(volumeResult),
 			static_cast<unsigned>(studioVolumeResult), static_cast<unsigned>(studioInputResult),
 			static_cast<unsigned>(genericInputResult), static_cast<int>(s_effectReverbKind),
-			s_effectReverbDepth, studioWetLevel);
+			s_effectReverbDepth, wetLevel);
 	}
 }
 
@@ -2081,7 +2107,7 @@ bool DecodeEffectAdpcm(const EFFECTBANK& bank, uint32_t sampleOffset, DecodedEff
 	return !decoded.pcm.empty();
 }
 
-void SetEffectVoicePan(IXAudio2SourceVoice* voice, int pan)
+void SetEffectVoicePan(IXAudio2SourceVoice* voice, int pan, bool reverbSend)
 {
 	if (!voice || !s_musicMasterVoice)
 		return;
@@ -2109,7 +2135,7 @@ void SetEffectVoicePan(IXAudio2SourceVoice* voice, int pan)
 		voice->SetOutputMatrix(dryDestination, 1,
 			destinationDetails.InputChannels, matrix.data()));
 	IXAudio2Voice* wetDestination = ActiveEffectWetVoice();
-	if (s_effectDryVoice && wetDestination)
+	if (reverbSend && s_effectDryVoice && wetDestination)
 	{
 		const float reverbMatrix[2] =
 		{
@@ -2295,18 +2321,22 @@ bool PlayEffectTone(AMB& amb, const EFFECTBANK& bank, const EFFECTBANK::SOUND& s
 	format.wBitsPerSample = 16;
 	format.nBlockAlign = 2;
 	format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
-	// Retail mixes gameplay effects on SPU2 core 0, then feeds that core's
-	// complete output through both the dry and external-wet gates on core 1.
-	// Parallel sends reproduce that bus routing without reverberating music,
-	// dialogue, or FMV voices which use their own source paths.
+	// 989SND routes each tone to the SPU2 reverb only when the bank sets tone
+	// flag 1 (OpenGOAL's toneflag::out_reverb). Sly's banks set it selectively
+	// (e.g. 6 of 140 tones in Clockwerk, most of Snow), so only those voices get
+	// a wet send; everything else stays dry like on the PS2.
 	EnsureEffectReverb();
+	active.reverbSend = (tone.flags & 1) != 0;
 	XAUDIO2_SEND_DESCRIPTOR sends[2]{};
 	UINT32 sendCount = 0;
 	if (s_effectDryVoice)
 	{
 		sends[sendCount++].pOutputVoice = s_effectDryVoice;
-		if (IXAudio2Voice* wet = ActiveEffectWetVoice())
+		IXAudio2Voice* wet = ActiveEffectWetVoice();
+		if (active.reverbSend && wet)
 			sends[sendCount++].pOutputVoice = wet;
+		else
+			active.reverbSend = false;
 	}
 	else
 	{
@@ -2365,7 +2395,8 @@ bool PlayEffectTone(AMB& amb, const EFFECTBANK& bank, const EFFECTBANK::SOUND& s
 	active.baseVolume = EffectVoiceVolume(active, 1.0f);
 	SetVoiceVolumeChecked(active.voice, EffectVoiceVolume(active, applicationVolume),
 		"Set gameplay-effect initial volume");
-	SetEffectVoicePan(active.voice, active.authoredPan + EffectSpatialPanDegrees(amb.pan));
+	SetEffectVoicePan(active.voice, active.authoredPan + EffectSpatialPanDegrees(amb.pan),
+		active.reverbSend);
 
 	const int centerNote = tone.centerNote >= 0 ? tone.centerNote : -tone.centerNote;
 	// 989SND stores centerFine as an unsigned 0..127 fraction above the
@@ -2505,7 +2536,8 @@ void TickEffectLfos(AMB& amb)
 			SetVoiceVolumeChecked(active.voice, EffectVoiceVolume(active,
 				(std::max)(0.0f, amb.volAttenuated + lfoVolume) * amb.autoVolumeScale),
 				"Update gameplay-effect LFO volume");
-			SetEffectVoicePan(active.voice, active.authoredPan + amb.lfoPan + EffectSpatialPanDegrees(amb.pan));
+			SetEffectVoicePan(active.voice, active.authoredPan + amb.lfoPan + EffectSpatialPanDegrees(amb.pan),
+				active.reverbSend);
 		}
 }
 
@@ -2632,6 +2664,85 @@ void UpdateEffectEnvelopes(AMB& amb)
 	}
 }
 
+// Voices of stopped sounds that are still in their release phase. Retail
+// StopSound(pamb, 0) calls snd_StopSound, which keys the voices off so their
+// ADSR release plays out, then frees the AMB at once. Cutting the voices
+// instead (as before) clicked and popped.
+static std::vector<EFFECTVOICE> s_releasingEffectVoices;
+
+static void ReleaseVoicesOfStoppedAmb(AMB& amb)
+{
+	float applicationVolume =
+		amb.volAttenuated + static_cast<float>(amb.lfoVolume) / 127.0f;
+	if (applicationVolume < 0.0f)
+		applicationVolume = 0.0f;
+	applicationVolume *= amb.autoVolumeScale;
+	for (EFFECTVOICE& active : amb.voices)
+	{
+		if (!active.voice || active.envelopePhase == EffectEnvelope_Stopped)
+			continue;
+		ReleaseEffectEnvelope(active);
+		active.releaseVolume = applicationVolume;
+		active.releaseTicks = 0;
+		s_releasingEffectVoices.push_back(std::move(active));
+		active.voice = nullptr; // ownership moved; RemoveAmb must not destroy it
+		active.pcm.clear();
+	}
+	amb.voices.erase(std::remove_if(amb.voices.begin(), amb.voices.end(),
+		[](const EFFECTVOICE& voice) { return voice.voice == nullptr; }), amb.voices.end());
+	amb.voice = amb.voices.empty() ? nullptr : amb.voices.front().voice;
+}
+
+static void TickReleasingEffectVoices(int ticks)
+{
+	// 30 s safety cap (240 Hz ticks) for a release rate that never reaches 0.
+	constexpr int kMaxReleaseTicks = 240 * 30;
+	for (EFFECTVOICE& active : s_releasingEffectVoices)
+	{
+		if (!active.voice)
+			continue;
+		XAUDIO2_VOICE_STATE state{};
+		active.voice->GetState(&state);
+		bool finished = state.BuffersQueued == 0;
+		for (int tick = 0; tick < ticks && !finished; ++tick)
+		{
+			for (int sample = 0; sample < 200; ++sample)
+				StepEffectEnvelope(active);
+			finished = active.envelopePhase == EffectEnvelope_Stopped ||
+				++active.releaseTicks >= kMaxReleaseTicks;
+		}
+		if (finished)
+		{
+			active.voice->Stop();
+			active.voice->DestroyVoice();
+			active.voice = nullptr;
+			active.pcm.clear();
+		}
+		else
+		{
+			SetVoiceVolumeChecked(active.voice, EffectVoiceVolume(active, active.releaseVolume),
+				"Update releasing gameplay-effect volume");
+		}
+	}
+	s_releasingEffectVoices.erase(std::remove_if(s_releasingEffectVoices.begin(),
+		s_releasingEffectVoices.end(),
+		[](const EFFECTVOICE& voice) { return voice.voice == nullptr; }),
+		s_releasingEffectVoices.end());
+}
+
+static void DestroyReleasingEffectVoices()
+{
+	for (EFFECTVOICE& active : s_releasingEffectVoices)
+	{
+		if (!active.voice)
+			continue;
+		active.voice->Stop();
+		active.voice->DestroyVoice();
+		active.voice = nullptr;
+	}
+	s_releasingEffectVoices.clear();
+}
+
 void ExecuteEffectGrain(AMB& amb)
 {
 	EFFECTBANK* bank = static_cast<EFFECTBANK*>(amb.bnk);
@@ -2672,8 +2783,8 @@ void ExecuteEffectGrain(AMB& amb)
 			if (sound.grains[i].type == 21) { amb.nextGrain = i - 1; break; }
 		break;
 	case 24: // STOP
-		for (EFFECTVOICE& active : amb.voices)
-			ReleaseEffectEnvelope(active);
+		// 989SND's STOP grain only ends the grain script; voices already
+		// playing continue (OpenGOAL snd_SFX_GRAIN_TYPE_STOP).
 		amb.handlerDone = true;
 		break;
 	case 25: // RAND_PLAY
@@ -2786,24 +2897,30 @@ void StartSound(SFXID sfxid, AMB** ppamb, ALO* palo, glm::vec3* ppos, float sSta
 	}
 	if ((sound.flags & 8u) != 0 && sound.instanceLimit > 0)
 	{
-		std::vector<AMB*> instances;
+		// 989SND CheckInstanceLimit: flag 0x10 replaces the quietest instance
+		// if the new one is louder, flag 0x20 replaces the oldest; otherwise
+		// the new sound is dropped. (The previous version had a dangling else,
+		// so 0x20 sounds were always dropped once the limit was reached.)
+		const bool byVolume = (sound.flags & 0x10u) != 0;
+		const bool byAge = (sound.flags & 0x20u) != 0;
+		AMB* weakest = nullptr;
+		int instances = 0;
 		for (const std::unique_ptr<AMB>& slot : g_psw->ambOwners)
-			if (slot && slot->bnk == bank && slot->soundIndex == mapping.isnd && !slot->fStopped)
-				instances.push_back(slot.get());
-		if (static_cast<int>(instances.size()) >= sound.instanceLimit)
 		{
-			AMB* weakest = nullptr;
-			if ((sound.flags & 0x10u) != 0)
-				for (AMB* instance : instances)
-					if (!weakest || instance->uVolAtSource < weakest->uVolAtSource) weakest = instance;
-			else if ((sound.flags & 0x20u) != 0)
-				for (AMB* instance : instances)
-					if (!weakest || instance->tStarted < weakest->tStarted) weakest = instance;
-			if (!weakest || ((sound.flags & 0x10u) != 0 && weakest->uVolAtSource >= uVolAtSource))
-			{
+			if (!slot || slot->bnk != bank || slot->soundIndex != mapping.isnd || slot->fStopped)
+				continue;
+			++instances;
+			if (!weakest ||
+				(byVolume && slot->uVolAtSource < weakest->uVolAtSource) ||
+				(byAge && slot->tStarted < weakest->tStarted))
+				weakest = slot.get();
+		}
+		if (instances >= sound.instanceLimit)
+		{
+			if (weakest && ((byVolume && weakest->uVolAtSource < uVolAtSource) || byAge))
+				StopSound(weakest, 0);
+			else
 				return;
-			}
-			StopSound(weakest, 0);
 		}
 	}
 	const bool continuous = FContinuousSound(sfxid);
@@ -3010,6 +3127,8 @@ void StopSound(AMB* pamb, int msRampdown)
 	pamb->handlerDone = true;
 	if (msRampdown <= 0 || pamb->voices.empty())
 	{
+		if (msRampdown <= 0)
+			ReleaseVoicesOfStoppedAmb(*pamb);
 		RemoveAmb(pamb);
 		return;
 	}
@@ -3070,14 +3189,13 @@ void SetEffectReverbTypeDepth(REVERBK kind, int depth)
 	}
 
 	// Retail initializes the selected SPU2 work area without reconnecting any
-	// voices. Silence the returns first, clear Studio C's history in place, then
-	// apply the new type/depth while the permanent wet-input bus stays connected.
+	// voices. Silence the returns first (switching the processor to OFF clears
+	// its work area), then load the new libsd preset and depth while the
+	// permanent wet-input bus stays connected.
 	s_effectReverbKind = REVERBK_None;
 	s_effectReverbDepth = 0;
 	ApplyCurrentEffectReverb();
 	EnsureEffectReverb();
-	if (s_effectStudioCProcessor)
-		s_effectStudioCProcessor->Reset();
 
 	s_effectReverbKind = kind;
 	s_effectReverbDepth = depth;
@@ -3286,7 +3404,8 @@ static void SetPambVolTree(AMB* pamb, float uVolAtSource)
 				(std::max)(0.0f, attenuatedVolume + static_cast<float>(pamb->lfoVolume) / 127.0f)) *
 				pamb->autoVolumeScale, "Update positioned gameplay-effect volume");
 			SetEffectVoicePan(active.voice,
-				active.authoredPan + pamb->lfoPan + EffectSpatialPanDegrees(pamb->pan));
+				active.authoredPan + pamb->lfoPan + EffectSpatialPanDegrees(pamb->pan),
+				active.reverbSend);
 		}
 	const std::vector<AMB*> children = pamb->children;
 	for (AMB* child : children)
@@ -3826,6 +3945,9 @@ void PauseAmbientSounds()
 		return;
 
 	s_fPauseAmbients = 1;
+	for (EFFECTVOICE& active : s_releasingEffectVoices)
+		if (active.voice)
+			ReportXAudioFailureOnce("Pause gameplay effects", active.voice->Stop());
 	if (g_psw == nullptr)
 		return;
 
@@ -3844,6 +3966,9 @@ void ContinueAmbientSounds()
 	if (s_fPauseAmbients == 0)
 		return;
 
+	for (EFFECTVOICE& active : s_releasingEffectVoices)
+		if (active.voice)
+			ReportXAudioFailureOnce("Resume gameplay effects", active.voice->Start());
 	if (g_psw != nullptr)
 	{
 		for (std::unique_ptr<AMB>& slot : g_psw->ambOwners)
@@ -4295,6 +4420,7 @@ void KillSounds(int msRampdown)
 	// Positional AMB playback is not backed by live PC voices yet. The active
 	// streamed VAG/dialog is, so stop and close it during world teardown.
 	StopVag();
+	DestroyReleasingEffectVoices();
 	if (g_psw != nullptr)
 	{
 		// The world is being torn down, so AMB back-pointers no longer need to
@@ -4385,6 +4511,28 @@ void KillSoundSystem()
 	// by SbpEnsureBank when the next world requests a different IBNK.
 }
 
+static std::unique_ptr<EFFECTBANK> LoadEffectBankFile(const std::filesystem::path& path, int ibnk)
+{
+	std::ifstream input(path, std::ios::binary);
+	if (!input.is_open())
+		return nullptr;
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+	if (bytes.empty())
+	{
+		std::printf("[SOUND BANK] Extracted bank is empty: %s\n", path.string().c_str());
+		return nullptr;
+	}
+	auto bank = std::make_unique<EFFECTBANK>();
+	bank->ibnk = ibnk;
+	bank->bytes = std::move(bytes);
+	if (!Parse989SfxBank(*bank))
+	{
+		std::printf("[SOUND BANK] Invalid or unsupported 989SND SBlk: %s\n", path.string().c_str());
+		return nullptr;
+	}
+	return bank;
+}
+
 SoundBankPtr SbpEnsureBank(int ibnk)
 {
 	if (ibnk < 0 || ibnk >= static_cast<int>(kEffectBankCount))
@@ -4411,24 +4559,36 @@ SoundBankPtr SbpEnsureBank(int ibnk)
 		std::printf("[SOUND BANK] Could not find extracted IBNK %d.\n", ibnk);
 		return nullptr;
 	}
-	std::ifstream input(path, std::ios::binary);
-	if (!input.is_open())
-		return nullptr;
-	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-	if (bytes.empty())
+	std::unique_ptr<EFFECTBANK> replacement = LoadEffectBankFile(path, ibnk);
+	// Every retail bank holds exactly the sounds its SFXID range maps to
+	// (169, 65, 136, 121, 102, 98, 80), and those counts are all different.
+	// ProjectCane 0.3's command-line File Extractor saved banks 2-5 under other
+	// names, which made whole worlds play another bank's sounds. If the file
+	// found by name is the wrong bank, use the bank file whose count matches.
+	const std::size_t expectedSounds = kEffectBankStarts[ibnk + 1] - kEffectBankStarts[ibnk];
+	if (replacement && replacement->sounds.size() != expectedSounds)
 	{
-		std::printf("[SOUND BANK] Extracted bank is empty: %s\n", path.string().c_str());
-		return nullptr;
+		for (const wchar_t* name : kEffectBankNames)
+		{
+			const std::filesystem::path candidate = path.parent_path() / name;
+			std::error_code error;
+			if (candidate == path || !std::filesystem::is_regular_file(candidate, error))
+				continue;
+			std::unique_ptr<EFFECTBANK> other = LoadEffectBankFile(candidate, ibnk);
+			if (other && other->sounds.size() == expectedSounds)
+			{
+				std::printf("[SOUND BANK] IBNK %d: %s holds the wrong bank; using %s\n", ibnk,
+					path.filename().string().c_str(), candidate.filename().string().c_str());
+				replacement = std::move(other);
+				break;
+			}
+		}
+		if (replacement->sounds.size() != expectedSounds)
+			std::printf("[SOUND BANK] IBNK %d: expected %zu sounds, %s has %zu\n", ibnk,
+				expectedSounds, path.filename().string().c_str(), replacement->sounds.size());
 	}
-
-	auto replacement = std::make_unique<EFFECTBANK>();
-	replacement->ibnk = ibnk;
-	replacement->bytes = std::move(bytes);
-	if (!Parse989SfxBank(*replacement))
-	{
-		std::printf("[SOUND BANK] Invalid or unsupported 989SND SBlk: %s\n", path.string().c_str());
+	if (!replacement)
 		return nullptr;
-	}
 	s_effectBanks[ibnk] = std::move(replacement);
 	if (!s_mpibnkfEverLoaded[ibnk])
 	{
@@ -4555,6 +4715,7 @@ void SetSwDefaultReverb(SW* psw, REVERBK rvrbk, int depth)
 
 static void DiscardAmbientEngineVoices(bool restartPersistentSounds)
 {
+	DestroyReleasingEffectVoices();
 	if (!g_psw)
 		return;
 	for (const std::unique_ptr<AMB>& slot : g_psw->ambOwners)
@@ -4615,6 +4776,7 @@ static void ReleaseAudioEngineGraph(bool restartPersistentSounds)
 	if (s_effectStudioCVoice)
 	{
 		s_effectStudioCProcessor = nullptr;
+		s_effectSpuModeApplied = -1;
 		s_effectStudioCVoice->DestroyVoice();
 		s_effectStudioCVoice = nullptr;
 	}
@@ -5008,6 +5170,7 @@ void UpdateSounds()
 	s_effectTickAccumulator += (std::min)(effectElapsed, 0.25) * 240.0;
 	const int effectTicks = static_cast<int>(s_effectTickAccumulator);
 	s_effectTickAccumulator -= effectTicks;
+	TickReleasingEffectVoices(effectTicks);
 
 	if (g_psw != nullptr)
 	{
