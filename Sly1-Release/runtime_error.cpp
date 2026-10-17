@@ -13,6 +13,8 @@
 #include <exception>
 #include <iostream>
 #include <mutex>
+#include <cstring>
+#include <cstdint>
 
 namespace
 {
@@ -28,12 +30,52 @@ namespace
 			? exceptionPointers->ExceptionRecord->ExceptionCode : 0;
 		const void* address = exceptionPointers != nullptr && exceptionPointers->ExceptionRecord != nullptr
 			? exceptionPointers->ExceptionRecord->ExceptionAddress : nullptr;
+		// Name the module the fault happened in (game, driver, SDK DLL...) and
+		// the offset inside it; a bare address means nothing on another PC.
+		char moduleName[MAX_PATH] = "unknown module";
+		uintptr_t moduleOffset = 0;
+		HMODULE module = nullptr;
+		if (address != nullptr && GetModuleHandleExA(
+				GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				static_cast<LPCSTR>(address), &module) && module != nullptr)
+		{
+			char modulePath[MAX_PATH] = {};
+			if (GetModuleFileNameA(module, modulePath, MAX_PATH) != 0)
+			{
+				const char* slash = std::strrchr(modulePath, '\\');
+				std::snprintf(moduleName, sizeof(moduleName), "%s", slash != nullptr ? slash + 1 : modulePath);
+			}
+			moduleOffset = reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(module);
+		}
+		char report[768];
+		std::snprintf(report, sizeof(report),
+			"[FATAL] Unhandled Windows exception 0x%08lX at %p (%s+0x%llX) on thread %lu.\n",
+			code, address, moduleName, static_cast<unsigned long long>(moduleOffset),
+			GetCurrentThreadId());
+		std::fprintf(stderr, "\n%s", report);
 		std::fprintf(stderr,
-			"\n[FATAL] Unhandled Windows exception 0x%08lX at %p on thread %lu.\n",
-			code, address, GetCurrentThreadId());
-		std::fprintf(stderr,
-			"Please copy this message and describe what was happening when the failure occurred.\n");
+			"Please copy this message and describe what was happening when the failure occurred.\n"
+			"(Also saved to crash.log next to the game.)\n");
 		std::fflush(stderr);
+
+		// Keep a copy beside the executable, with the time.
+		char exePath[MAX_PATH] = {};
+		if (GetModuleFileNameA(nullptr, exePath, MAX_PATH) != 0)
+		{
+			if (char* slash = std::strrchr(exePath, '\\'))
+				slash[1] = '\0';
+			char logPath[MAX_PATH + 16] = {};
+			std::snprintf(logPath, sizeof(logPath), "%scrash.log", exePath);
+			FILE* file = nullptr;
+			if (fopen_s(&file, logPath, "a") == 0 && file != nullptr)
+			{
+				SYSTEMTIME st{};
+				GetLocalTime(&st);
+				std::fprintf(file, "%04u-%02u-%02u %02u:%02u:%02u %s",
+					st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, report);
+				std::fclose(file);
+			}
+		}
 		MessageBoxW(nullptr,
 			L"ProjectCane encountered a fatal error.\n\n"
 			L"The error details were printed in the diagnostic console.",

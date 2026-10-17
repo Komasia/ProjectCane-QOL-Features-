@@ -72,6 +72,20 @@ void FsrLog(const char* fmt, ...)
 	std::vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
 	std::cout << "[FSR] " << buffer << std::endl;
+
+	// Also keep FSR.log next to the executable (the console only appears after
+	// a crash, so these messages were otherwise lost). Recreated each run.
+	static bool s_fLogStarted = false;
+	wchar_t exePath[MAX_PATH] = {};
+	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+	const std::filesystem::path logPath = std::filesystem::path(exePath).parent_path() / L"FSR.log";
+	FILE* file = _wfopen(logPath.c_str(), s_fLogStarted ? L"a" : L"w");
+	s_fLogStarted = true;
+	if (file != nullptr)
+	{
+		std::fprintf(file, "%s\n", buffer);
+		std::fclose(file);
+	}
 }
 
 // =============================================================================
@@ -150,6 +164,8 @@ struct FSRSTATE
 
 	FSRBACKEND backend = FSRB_None;
 	std::string sdkStatus;      // why the SDK backend is not used (log/menu)
+	bool fSdkFaulted = false;   // the driver crashed inside the SDK path this run
+	int cSdkFramesOk = 0;       // successful SDK frames since startup (crash guard)
 	char version[32] = "FSR";
 
 	// ---- Final output (both backends): present size, with depth/stencil ----
@@ -1105,6 +1121,29 @@ void FfxMessageCallback(uint32_t type, const wchar_t* message)
 	FsrLog("%s: %s", type == FFX_API_MESSAGE_TYPE_ERROR ? "error" : "warning", text);
 }
 
+// AMD GCN-era device IDs (Southern Islands through Polaris and Vega, plus
+// their APUs). RDNA starts at 0x7310 (Navi 10); 0x7300 is still Fiji (GCN).
+bool FAmdPreRdna(UINT vendorId, UINT deviceId)
+{
+	if (vendorId != 0x1002)
+		return false;
+	if (deviceId >= 0x6600 && deviceId <= 0x6FFF)   // SI, CI, VI, Polaris, Vega 10/20
+		return true;
+	if (deviceId >= 0x9800 && deviceId <= 0x98FF)   // Kabini, Mullins, Stoney
+		return true;
+	if (deviceId >= 0x1300 && deviceId <= 0x131F)   // Kaveri
+		return true;
+	switch (deviceId)
+	{
+	case 0x7300: case 0x730F:                        // Fiji
+	case 0x15D8: case 0x15DD: case 0x15E7:           // Picasso, Raven, Barcelo
+	case 0x1636: case 0x1638: case 0x164C:           // Renoir, Cezanne, Lucienne
+		return true;
+	default:
+		return false;
+	}
+}
+
 bool InitializeSdk()
 {
 	if (!LoadGlInterop())
@@ -1157,6 +1196,19 @@ bool InitializeSdk()
 
 	DXGI_ADAPTER_DESC1 desc{};
 	adapter->GetDesc1(&desc);
+	if (FAmdPreRdna(desc.VendorId, desc.DeviceId))
+	{
+		// GCN Radeons (HD 7000 to RX 500 / Vega, and their APUs) are on AMD's
+		// legacy driver branch, whose OpenGL <-> D3D12 texture/fence sharing can
+		// crash inside the driver instead of failing cleanly (an RX 560 did).
+		// FSR 1 runs entirely in OpenGL and needs no sharing.
+		adapter->Release();
+		static char reason[96];
+		std::snprintf(reason, sizeof(reason),
+			"pre-RDNA AMD GPU (device 0x%04X): OpenGL/D3D12 sharing is unreliable on its driver",
+			desc.DeviceId);
+		return SdkFail(reason);
+	}
 	const HRESULT hrDevice = pfnCreateDevice(adapter, D3D_FEATURE_LEVEL_12_0,
 		__uuidof(ID3D12Device), reinterpret_cast<void**>(&s_fsr.device));
 	adapter->Release();
@@ -1506,19 +1558,119 @@ bool FEvaluateSdk(const DLSSCAMERA& cam, GLuint sceneColorTex, GLuint sceneDepth
 	return true;
 }
 
+// ---- Driver-crash protection for the SDK (FSR 4 / 3.1) path -----------------
+// A crash inside the GPU driver while sharing textures between OpenGL and
+// D3D12 must not take the game down. Calls into the SDK path run under SEH;
+// a fault abandons that path (without touching the driver again) and FSR 1
+// takes over. FSR.ini [FSR] SdkCrashGuard=1 is written before every attempt and
+// cleared once the path has worked for a while, so a crash that cannot be
+// caught (e.g. on a driver thread) still makes the next launch use FSR 1.
+constexpr int kSdkFramesTrusted = 300;
+
+int ReadSdkCrashGuard()
+{
+	return static_cast<int>(GetPrivateProfileIntW(L"FSR", L"SdkCrashGuard", 0, IniPath().c_str()));
+}
+
+void WriteSdkCrashGuard(int value)
+{
+	WritePrivateProfileStringW(L"FSR", L"SdkCrashGuard", value != 0 ? L"1" : L"0", IniPath().c_str());
+}
+
+// Drops every SDK object without calling into the driver or D3D12 again
+// (their state is unknown after a fault). The leak is a one-off.
+void AbandonSdk()
+{
+	s_fsr.device = nullptr;
+	s_fsr.queue = nullptr;
+	s_fsr.fence = nullptr;
+	s_fsr.hFence = nullptr;
+	s_fsr.hFenceEvent = nullptr;
+	s_fsr.fenceValue = 0;
+	for (DXSLOT& slot : s_fsr.slots)
+		slot = DXSLOT{};
+	s_fsr.color = s_fsr.depth = s_fsr.motion = s_fsr.output = SHAREDTEX{};
+	s_fsr.glFence = 0;
+	s_fsr.prepProgram = s_fsr.prepVao = s_fsr.prepFbo = s_fsr.blitReadFbo = s_fsr.blitDrawFbo = 0;
+	s_fsr.context = nullptr;
+	s_fsr.CreateContext = nullptr;
+	s_fsr.DestroyContext = nullptr;
+	s_fsr.Configure = nullptr;
+	s_fsr.Query = nullptr;
+	s_fsr.Dispatch = nullptr;
+}
+
+void OnSdkFault(const char* where, DWORD code)
+{
+	FsrLog("Driver fault 0x%08lX in %s; FSR 4 / 3.1 disabled, using FSR 1.", code, where);
+	s_fsr.fSdkFaulted = true;
+	s_fsr.sdkStatus = "the graphics driver crashed in the OpenGL/D3D12 path";
+	AbandonSdk();
+	WriteSdkCrashGuard(1);   // stay on FSR 1 on later launches too
+	while (glGetError() != GL_NO_ERROR) {}
+}
+
+// SEH wrappers: no C++ objects may live in a function that uses __try.
+int TryInitializeSdk(DWORD* pcode)
+{
+	__try
+	{
+		return InitializeSdk() ? 1 : 0;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		*pcode = GetExceptionCode();
+		return -1;
+	}
+}
+
+int TryEvaluateSdk(const DLSSCAMERA* pcam, GLuint sceneColorTex, GLuint sceneDepthTex,
+	int renderWidth, int renderHeight, int outputWidth, int outputHeight, DWORD* pcode)
+{
+	__try
+	{
+		return FEvaluateSdk(*pcam, sceneColorTex, sceneDepthTex,
+			renderWidth, renderHeight, outputWidth, outputHeight) ? 1 : 0;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		*pcode = GetExceptionCode();
+		return -1;
+	}
+}
+
 // Picks the backend the first time FSR is needed.
 void EnsureBackend()
 {
 	if (s_fsr.backend != FSRB_None)
 		return;
-	if (InitializeSdk())
+
+	int result = 0;
+	if (ReadSdkCrashGuard() != 0)
+	{
+		SdkFail("FSR 4 / 3.1 crashed on an earlier run (set SdkCrashGuard=0 in FSR.ini to retry)");
+	}
+	else
+	{
+		WriteSdkCrashGuard(1);
+		DWORD code = 0;
+		result = TryInitializeSdk(&code);
+		if (result < 0)
+			OnSdkFault("FSR 4 / 3.1 setup", code);
+		else if (result == 0)
+			WriteSdkCrashGuard(0);   // failed cleanly: nothing to guard against
+	}
+
+	if (result > 0)
 	{
 		s_fsr.backend = FSRB_Sdk;
+		s_fsr.cSdkFramesOk = 0;
 		std::snprintf(s_fsr.version, sizeof(s_fsr.version), "FSR");
 	}
 	else
 	{
-		ShutdownSdk();
+		if (!s_fsr.fSdkFaulted)
+			ShutdownSdk();
 		s_fsr.backend = FSRB_Fsr1;
 		std::snprintf(s_fsr.version, sizeof(s_fsr.version), "FSR 1");
 	}
@@ -1526,7 +1678,8 @@ void EnsureBackend()
 
 void FallBackToFsr1()
 {
-	ShutdownSdk();
+	if (!s_fsr.fSdkFaulted)
+		ShutdownSdk();
 	s_fsr.backend = FSRB_Fsr1;
 	s_fsr.fJitterThisFrame = false;
 	std::snprintf(s_fsr.version, sizeof(s_fsr.version), "FSR 1");
@@ -1546,7 +1699,8 @@ void StartupFsr()
 
 void ShutdownFsr()
 {
-	ShutdownSdk();
+	if (!s_fsr.fSdkFaulted)
+		ShutdownSdk();
 	DestroyTargets();
 	ShutdownFsr1();
 	s_fsr.backend = FSRB_None;
@@ -1664,8 +1818,23 @@ bool FEvaluateFsr(const DLSSCAMERA& cam, GLuint sceneColorTex, GLuint sceneDepth
 	EnsureBackend();
 	if (s_fsr.backend == FSRB_Sdk)
 	{
-		if (s_fsr.fJitterThisFrame && FEvaluateSdk(cam, sceneColorTex, sceneDepthTex,
-			renderWidth, renderHeight, outputWidth, outputHeight))
+		int result = 0;
+		if (s_fsr.fJitterThisFrame)
+		{
+			DWORD code = 0;
+			result = TryEvaluateSdk(&cam, sceneColorTex, sceneDepthTex,
+				renderWidth, renderHeight, outputWidth, outputHeight, &code);
+			if (result < 0)
+			{
+				OnSdkFault("the FSR 4 / 3.1 frame", code);
+				FallBackToFsr1();
+				return false;
+			}
+			if (result > 0 && s_fsr.cSdkFramesOk < kSdkFramesTrusted &&
+				++s_fsr.cSdkFramesOk == kSdkFramesTrusted)
+				WriteSdkCrashGuard(0);   // this GPU/driver handles the SDK path
+		}
+		if (result > 0)
 		{
 			// The HUD must see the scene's depth/stencil (binocucom TV portraits).
 			BlitSceneDepthStencil(sceneDepthTex, renderWidth, renderHeight, s_fsr.outFbo, outputWidth, outputHeight);
