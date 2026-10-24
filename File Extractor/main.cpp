@@ -1,4 +1,5 @@
 #include "main.h"
+#include "BrxWalker.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -235,6 +236,53 @@ static fs::path GetExecutableDirectory()
     path.resize(length);
 
     return fs::path(path).parent_path();
+}
+
+// ProjectCane 0.4.1+ loads levels only in its PCBRX format. The level
+// rebuilder from ProjectCane's File Extractor GUI (NativeTools/BrxRebuilder,
+// compiled into this exe) converts a decompressed retail level into PCBRX v17
+// and writes "<input>_Rebuilt.brx" beside it, exactly as Sly1BrxRebuilder.exe.
+static bool RebuildBrx(const fs::path& input, std::string& error)
+{
+    try
+    {
+        BrxWalker walker(StringEncoding::Narrow, BrxSourceRegion::Auto);
+        walker.WalkFile(input);
+        return true;
+    }
+    catch (const std::exception& exception)
+    {
+        error = exception.what();
+        return false;
+    }
+}
+
+static bool FPcBrxFile(const fs::path& path, uint32_t expectedVersion)
+{
+    std::ifstream input(path, std::ios::binary);
+    uint32_t header[2]{};
+    return input.read(reinterpret_cast<char*>(header), sizeof(header)) &&
+        header[0] == 0x52424350u && header[1] == expectedVersion; // "PCBR"
+}
+
+// Same content as the File Extractor GUI writes for an NTSC-U disc. The game
+// finds the extracted data (and its region) through this file.
+static bool WriteExtractionManifest(const fs::path& outputDirectory)
+{
+    std::ofstream manifest(outputDirectory / "extraction_manifest.json", std::ios::trunc);
+    manifest <<
+        "{\n"
+        "  \"schemaVersion\": 1,\n"
+        "  \"game\": \"Sly Cooper and the Thievius Raccoonus\",\n"
+        "  \"region\": \"NTSC-U\",\n"
+        "  \"serial\": \"SCUS-971.98\",\n"
+        "  \"levelFormat\": \"PCBRX\",\n"
+        "  \"levelFormatVersion\": 17,\n"
+        "  \"languages\": [\n"
+        "    \"English\"\n"
+        "  ]\n"
+        "}\n";
+    return static_cast<bool>(manifest);
 }
 
 static bool ReadExactAt(std::ifstream& file, uint64_t offset, void* destination, std::size_t size)
@@ -1531,24 +1579,36 @@ int main(int argc, char** argv)
 
         const std::vector<uint8_t> decompressed = Decompress(compressed);
 
-        std::ofstream output(outputPath, std::ios::binary);
-
-        if (!output.is_open())
+        // Decompressed retail level -> temporary file -> PCBRX v17.
+        const fs::path retailPath = levelOutputDirectory / (".retail_" + std::to_string(index) + ".brx");
+        const fs::path rebuiltPath = levelOutputDirectory / (".retail_" + std::to_string(index) + "_Rebuilt.brx");
+        if (!WriteBinaryFile(retailPath, decompressed))
         {
-            std::cerr << "Could not create output file:\n" << outputPath << '\n';
+            std::cerr << "Failed writing temporary level file:\n" << retailPath << '\n';
             return Finish(EXIT_FAILURE);
         }
 
-        if (!decompressed.empty())
-            output.write(reinterpret_cast<const char*>(decompressed.data()), static_cast<std::streamsize>(decompressed.size()));
+        std::string rebuildError;
+        const bool rebuilt = RebuildBrx(retailPath, rebuildError);
+        std::error_code removeError;
+        fs::remove(retailPath, removeError);
+        if (!rebuilt || !FPcBrxFile(rebuiltPath, 17))
+        {
+            if (rebuildError.empty())
+                rebuildError = "the level rebuilder did not produce a PCBRX v17 level";
+            std::cerr << "Could not convert " << levelName << ": " << rebuildError << '\n';
+            fs::remove(rebuiltPath, removeError);
+            return Finish(EXIT_FAILURE);
+        }
 
-        if (!output)
+        std::error_code renameError;
+        fs::remove(outputPath, removeError);
+        fs::rename(rebuiltPath, outputPath, renameError);
+        if (renameError)
         {
             std::cerr << "Failed writing output file:\n" << outputPath << '\n';
             return Finish(EXIT_FAILURE);
         }
-
-        output.close();
 
         std::cout
             << "    decompressed size: " << decompressed.size() << '\n'
@@ -1712,9 +1772,10 @@ int main(int argc, char** argv)
             return Finish(EXIT_FAILURE);
         }
 
+        // Levels reference commentary audio by this name (ProjectCane 0.4.1+).
         char commentaryFileName[40]{};
         std::snprintf(commentaryFileName, sizeof(commentaryFileName),
-            "Commentary_%04X.wav", commentary.levelId);
+            "VAG_%04X_%06X.wav", identity, sector);
         const fs::path commentaryOutputPath = commentaryDirectory / commentaryFileName;
         std::vector<uint8_t> commentaryWav;
         std::string commentaryConversionError;
@@ -1780,25 +1841,10 @@ int main(int argc, char** argv)
             return Finish(EXIT_FAILURE);
         }
 
-        const bool hasIdentityCollision = std::count_if(
-            std::begin(DIALOG_AUDIO_TABLE), std::end(DIALOG_AUDIO_TABLE),
-            [&dialogAudio](const DIALOGAUDIOINFO& candidate)
-            {
-                return candidate.levelId == dialogAudio.levelId &&
-                    candidate.identity == dialogAudio.identity;
-            }) > 1;
-
+        // Levels reference dialog audio by this name (ProjectCane 0.4.1+).
         char audioFileName[64]{};
-        if (hasIdentityCollision)
-        {
-            std::snprintf(audioFileName, sizeof(audioFileName),
-                "VAG_%04X_%06X.wav", dialogAudio.identity, dialogAudio.sector);
-        }
-        else
-        {
-            std::snprintf(audioFileName, sizeof(audioFileName),
-                "VAG_%04X.wav", dialogAudio.identity);
-        }
+        std::snprintf(audioFileName, sizeof(audioFileName),
+            "VAG_%04X_%06X.wav", dialogAudio.identity, dialogAudio.sector);
 
         const uint64_t dataOffset = static_cast<uint64_t>(dialogAudio.sector) * ISO_SECTOR_SIZE;
         uint32_t audioSize = dialogAudio.size;
@@ -2066,7 +2112,13 @@ int main(int argc, char** argv)
         << "    size: " << promptSize << '\n'
         << "    output: " << promptOutputPath << "\n\n";
 
-    std::cout << "Finished extracting " << LEVEL_COUNT << " BRX files, "
+    if (!WriteExtractionManifest(outputDirectory))
+    {
+        std::cerr << "Failed writing extraction_manifest.json in:\n" << outputDirectory << '\n';
+        return Finish(EXIT_FAILURE);
+    }
+
+    std::cout << "Finished extracting " << LEVEL_COUNT << " PCBRX levels, "
               << extractedMusicIds.size() << " unique music files, "
               << EXTRACTED_CUTSCENE_COUNT << " cutscene M2V/WAV pairs, " << JLO_AMBIENT_COUNT
               << " JLO ambient WAV files, and the prompt WAV into:\n"

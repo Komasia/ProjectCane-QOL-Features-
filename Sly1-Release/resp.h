@@ -166,6 +166,24 @@ enum RESPK : int
 	RESPK_CutsceneSkipControls,              // 179 Gameplay > "Dialog Skip Controls"
 	RESPK_RetailTiming,                      // 180 Gameplay > "Retail Timing"
 
+	// From ProjectCane 0.5.0.
+	RESPK_MouseSensitivity,                  // 181 (unused: Mouse Settings has its own)
+	RESPK_AutoIconify,                       // 182 Gameplay > "Minimize When Unfocused"
+	RESPK_AnisotropicFiltering,              // 183 (unused: RESPK_Anisotropy is ours)
+	RESPK_OutputGamma,                       // 184 Video > Display > "Brightness / Gamma"
+	RESPK_TextureFiltering,                  // 185 Video > Graphics
+	RESPK_Monitor,                           // 186 Video > Display
+	RESPK_ResetVideo,                        // 187 (unused: Options > Reset to Default)
+	RESPK_ResolutionScale,                   // 188 Video > Display
+	RESPK_ControllerDeadzone,                // 189 Controller Settings
+	RESPK_AudioOutputDevice,                 // 190 Sound
+	RESPK_ResetMappings,                     // 191 Mapping menus
+	RESPK_LanguageEnglish,                   // 192 Language menu (PAL / Japanese data)
+	RESPK_LanguageFrench,
+	RESPK_LanguageGerman,
+	RESPK_LanguageSpanish,
+	RESPK_LanguageItalian,                   // 196
+
 	RESPK_Max
 };
 
@@ -238,7 +256,8 @@ enum PRK : int
 	PRK_VideoUpscaling = 55,
 	PRK_Gameplay = 56,
 	PRK_DisplayConfirm = 57,     // "Keep these display settings?" (auto-revert)
-	PRK_Max = 58
+	PRK_LanguageMenu = 58,
+	PRK_Max = 59
 };
 
 // -----------------------------------------------------------------------------
@@ -370,6 +389,16 @@ inline RESPK s_arespkContinue[1] =
     RESPK_Continue
 };
 
+inline RESPK s_arespkLanguageMenu[6] =
+{
+	RESPK_LanguageEnglish,
+	RESPK_LanguageFrench,
+	RESPK_LanguageGerman,
+	RESPK_LanguageSpanish,
+	RESPK_LanguageItalian,
+	RESPK_Back
+};
+
 inline RESPK s_arespkSlots[7] =
 {
     RESPK_Slot1,
@@ -399,35 +428,36 @@ inline RESPK s_arespkControlsMenu[12]{};
 
 // Controls > Controller Settings (Controller Mapping is left out when no
 // gamepad is connected; built in SetPromptPrk).
-inline const RESPK s_arespkControllerMenuAll[5] =
+inline const RESPK s_arespkControllerMenuAll[6] =
 {
 	RESPK_CameraSensitivity,
 	RESPK_ButtonIcons,
+	RESPK_ControllerDeadzone,
 	RESPK_DisableControllerWhenUnfocused,
 	RESPK_ControllerMapping,
 	RESPK_Back
 };
 
-inline RESPK s_arespkControllerMenu[5]{};
+inline RESPK s_arespkControllerMenu[6]{};
 
-inline RESPK s_arespkKeyboardMapping[17] =
+inline RESPK s_arespkKeyboardMapping[18] =
 {
 	RESPK_KeyUp, RESPK_KeyDown, RESPK_KeyLeft, RESPK_KeyRight,
 	RESPK_KeySquare, RESPK_KeyCircle, RESPK_KeyCross, RESPK_KeyTriangle,
 	RESPK_KeyStart, RESPK_KeySelect, RESPK_KeyL1, RESPK_KeyR1,
 	RESPK_KeyL2, RESPK_KeyR2, RESPK_KeyL3, RESPK_KeyR3,
-	RESPK_Back
+	RESPK_ResetMappings, RESPK_Back
 };
 
 // Mouse & Keyboard Mapping: the 16 game buttons plus the PC-only hotkeys.
-inline RESPK s_arespkKbMouseMapping[20] =
+inline RESPK s_arespkKbMouseMapping[21] =
 {
 	RESPK_KeyUp, RESPK_KeyDown, RESPK_KeyLeft, RESPK_KeyRight,
 	RESPK_KeySquare, RESPK_KeyCircle, RESPK_KeyCross, RESPK_KeyTriangle,
 	RESPK_KeyStart, RESPK_KeySelect, RESPK_KeyL1, RESPK_KeyR1,
 	RESPK_KeyL2, RESPK_KeyR2, RESPK_KeyL3, RESPK_KeyR3,
 	RESPK_KeyFfHold, RESPK_KeyFfToggle, RESPK_KeyScreenshot,
-	RESPK_Back
+	RESPK_ResetMappings, RESPK_Back
 };
 
 // -----------------------------------------------------------------------------
@@ -477,11 +507,11 @@ inline RESPK s_arespkOptionsMenu[std::size(s_arespkOptionsMenuAll)]{};
 // Video tabs (built in SetPromptPrk; rows that can't apply right now are left out).
 inline const RESPK s_arespkVideoDisplayAll[] =
 {
-    RESPK_WindowMode, RESPK_AspectRatio, RESPK_InternalResolution, RESPK_FrameRate, RESPK_Vsync, RESPK_Back
+    RESPK_WindowMode, RESPK_Monitor, RESPK_AspectRatio, RESPK_InternalResolution, RESPK_ResolutionScale, RESPK_FrameRate, RESPK_Vsync, RESPK_OutputGamma, RESPK_Back
 };
 inline const RESPK s_arespkVideoGraphicsAll[] =
 {
-    RESPK_DrawDistance, RESPK_Fov, RESPK_Anisotropy, RESPK_Msaa, RESPK_Fog, RESPK_Back
+    RESPK_DrawDistance, RESPK_Fov, RESPK_Anisotropy, RESPK_TextureFiltering, RESPK_Msaa, RESPK_Fog, RESPK_Back
 };
 inline const RESPK s_arespkVideoUpscalingAll[] =
 {
@@ -494,7 +524,7 @@ inline RESPK s_arespkVideoUpscaling[std::size(s_arespkVideoUpscalingAll)]{};
 // Options > Gameplay
 inline RESPK s_arespkGameplayMenu[] =
 {
-    RESPK_HdrGeneral, RESPK_PauseOnFocusLoss, RESPK_Vibration,
+    RESPK_HdrGeneral, RESPK_PauseOnFocusLoss, RESPK_AutoIconify, RESPK_Vibration,
     RESPK_HdrHud, RESPK_FpsCounter, RESPK_GuiStyle, RESPK_GuiScale,
     RESPK_HdrSpeedrun, RESPK_RetailTiming, RESPK_TimerEnable, RESPK_CutsceneSkipControls,
     RESPK_Back
@@ -555,6 +585,17 @@ inline RESPK s_arespkBackupsMenu[10]{};
 inline char g_achzCutsceneSkip[64]{};
 // Gameplay > Retail Timing (PS2 59.94 Hz game updates).
 inline char g_achzRetailTiming[64]{};
+// From ProjectCane 0.5.0 (rows ours lists; 66/67 there were Mouse Camera / Dialog Skip).
+inline char g_achzRespk68[128]{};
+inline char g_achzRespk69[128]{};
+inline char g_achzRespk70[128]{};
+inline char g_achzRespk71[128]{};
+inline char g_achzRespk72[128]{};
+inline char g_achzRespk73[96]{};
+inline char g_achzRespk74[64]{};
+inline char g_achzRespk75[64]{};
+inline char g_achzRespk76[64]{};
+inline char g_achzRespk77[128]{};
 inline char g_aachzKeyboardBindings[BTN_MAX][64]{};
 
 // -----------------------------------------------------------------------------
@@ -605,6 +646,9 @@ inline const char* const s_apchzRespk26[2] =
 
 inline RESPK s_arespkSoundMenu[] =
 {
+	#ifdef _WIN32
+	RESPK_AudioOutputDevice,
+	#endif
 	RESPK_Speakers, RESPK_MusicVolume, RESPK_SfxVolume,
 	RESPK_DialogueVolume, RESPK_Back
 };
@@ -902,6 +946,22 @@ inline const char* s_mprespkachz[RESPK_Max] =
 	"Mouse Camera",              // 178 RESPK_MouseCamera (unused)
 	g_achzCutsceneSkip,         // 179 RESPK_CutsceneSkipControls
 	g_achzRetailTiming,         // 180 RESPK_RetailTiming
+	g_achzRespk68,            // 181 RESPK_MouseSensitivity
+	g_achzRespk69,            // 182 RESPK_AutoIconify
+	g_achzRespk70,            // 183 RESPK_AnisotropicFiltering
+	g_achzRespk71,            // 184 RESPK_OutputGamma
+	g_achzRespk72,            // 185 RESPK_TextureFiltering
+	g_achzRespk73,            // 186 RESPK_Monitor
+	"Reset Video Settings",   // 187 RESPK_ResetVideo
+	g_achzRespk75,            // 188 RESPK_ResolutionScale
+	g_achzRespk76,            // 189 RESPK_ControllerDeadzone
+	g_achzRespk77,            // 190 RESPK_AudioOutputDevice
+	"Reset Mappings",         // 191 RESPK_ResetMappings
+	"English",                // 192 RESPK_LanguageEnglish
+	"Fran\xC3\xA7""ais",      // 193 RESPK_LanguageFrench
+	"Deutsch",                // 194 RESPK_LanguageGerman
+	"Espa\xC3\xB1""ol",       // 195 RESPK_LanguageSpanish
+	"Italiano",               // 196 RESPK_LanguageItalian
 };
 static_assert(MSOPT_Max == 39, "update s_mprespkachz for MSOPT");
 static_assert(MOUSEOPT_Max == 8, "update s_mprespkachz for MOUSEOPT");
@@ -987,12 +1047,16 @@ inline RESPD s_arespd[RESPK_Max] =
 	{ 0, nullptr }, { 0, nullptr }, { 0, nullptr }, { 0, nullptr },
 	{ 0, nullptr }, { 0, nullptr }, { 0, nullptr }, { 0, nullptr },
 	{ 0, nullptr }, { 0, nullptr }, { 0, nullptr },                   // 178-180
+	{ 0, nullptr }, { 0, nullptr }, { 0, nullptr }, { 0, nullptr },   // 181-184
+	{ 0, nullptr }, { 0, nullptr }, { 0, nullptr }, { 0, nullptr },   // 185-188
+	{ 0, nullptr }, { 0, nullptr }, { 0, nullptr }, { 0, nullptr },   // 189-192
+	{ 0, nullptr }, { 0, nullptr }, { 0, nullptr }, { 0, nullptr },   // 193-196
 };
 
 // -----------------------------------------------------------------------------
 // Prompt descriptor table
 //
-// There must be exactly one entry for every numeric PRK from 0 through 32.
+// There must be exactly one entry for every numeric PRK.
 // -----------------------------------------------------------------------------
 
 inline PRD s_mpprkprd[PRK_Max] =
@@ -1055,6 +1119,7 @@ inline PRD s_mpprkprd[PRK_Max] =
 	{ "Video", 1.0f, 0.8f, 1, 0, s_arespkVideoUpscaling },                                  // 55 PRK_VideoUpscaling (built in SetPromptPrk)
 	{ "Gameplay", 1.0f, 0.8f, 1, static_cast<int>(std::size(s_arespkGameplayMenu)), s_arespkGameplayMenu }, // 56 PRK_Gameplay
 	{ g_achzDisplayConfirm, 1.0f, 1.0f, 0, 2, s_arespkYesNo },                              // 57 PRK_DisplayConfirm
+	{ "Language...", 1.0f, 1.0f, 1, static_cast<int>(std::size(s_arespkLanguageMenu)), s_arespkLanguageMenu }, // 58 PRK_LanguageMenu
 };
 
 static_assert(sizeof(s_mpprkprd) / sizeof(s_mpprkprd[0]) == PRK_Max);

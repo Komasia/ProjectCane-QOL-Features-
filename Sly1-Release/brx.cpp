@@ -70,7 +70,7 @@ void LoadSwObjectsFromBrx(SW *psw, ALO *paloParent, CBinaryInputStream *pbis)
 		// Objects ID
 		OID oid = (OID)pbis->S16Read();
 		// Objects splice event index
-  		int isplice = pbis->S16Read();
+		int isplice = pbis->S16Read();
 		// Making new object and initializing the object
 		LO *plo = PloNew(cid, psw, paloParent, oid, isplice);
 		// Loading object from binary file
@@ -90,10 +90,22 @@ void LoadOptionsFromBrx(LO* pvObject, CBinaryInputStream* pbis)
 {
 	while (true)
 	{
+		const std::size_t optionOffset = pbis->GetOffset();
 		// Reading eopid from binary file
 		int16_t eopid = pbis->S16Read();
         
 		if (eopid < 0) break;
+		if (eopid >= static_cast<int16_t>(std::size(g_aeopid)))
+		{
+			throw std::runtime_error(
+				"Invalid EOPID " + std::to_string(eopid) +
+				" at PCBRX offset 0x" + [&]
+				{
+					char offset[32]{};
+					std::snprintf(offset, sizeof(offset), "%zX", optionOffset);
+					return std::string(offset);
+				}());
+		}
 
 		LoadOptionFromBrx(pvObject, &g_aeopid[eopid], pbis);
 	}
@@ -379,7 +391,6 @@ void LoadOptionFromBrx(void* pvStruct, EOPID* peopid, CBinaryInputStream* pbis)
 void LoadSkipOptionFromBrx(void* pvObject, EOPID* peopid, int eopidID, CBinaryInputStream* pbis)
 {
 	(void)pvObject;
-	(void)eopidID;
 
 	if ((peopid->grfeopid & 0x400) != 0)
 	{

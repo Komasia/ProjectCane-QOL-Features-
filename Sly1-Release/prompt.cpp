@@ -11,6 +11,7 @@
 #include "ctr.h"
 #include "screen.h"
 #include "gl.h"
+#include "shd.h"
 #include "gui_layout.h"
 #include "render.h"
 #include "font.h"
@@ -24,10 +25,13 @@
 #include <cstdlib>
 #include <string>
 #include "debug.h"
+#include "Input.h"
+#include "content.h"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 #include <vector>
 
@@ -37,12 +41,120 @@ int s_iKeyboardBindingCapture = -1;
 bool s_fKeyboardBindingCaptureArmed = false;
 bool s_fControllerBindingCapture = false;
 
+const char* PcText(const char* english, const char* french, const char* german,
+	const char* spanish, const char* italian)
+{
+	if (FJapaneseContent())
+	{
+		struct JapanesePcText { const char* english; const char* japanese; };
+		static constexpr JapanesePcText translations[] =
+		{
+			{"On", "オン"}, {"Off", "オフ"},
+			{"Video", "ビデオ"}, {"Sound", "サウンド"}, {"Controls", "操作設定"},
+			{"Keyboard Mapping", "キーボード設定"}, {"Controller Mapping", "コントローラー設定"},
+			{"Frame Rate", "フレームレート"}, {"Resolution", "解像度"},
+			{"Scaled", "スケーリング"}, {"Native", "ネイティブ"}, {"Fog", "フォグ"},
+			{"Low", "低"}, {"Original", "オリジナル"}, {"High", "高"},
+			{"Very High", "最高"}, {"Extreme", "極限"}, {"Draw Distance", "描画距離"},
+			{"Custom", "カスタム"}, {"Windowed", "ウィンドウ"},
+			{"Borderless", "ボーダーレス"}, {"Fullscreen", "フルスクリーン"},
+			{"Window Mode", "表示モード"}, {"Minimize When Unfocused", "非アクティブ時に最小化"},
+			{"Anisotropic Filtering", "異方性フィルタリング"},
+			{"Brightness / Gamma", "明るさ / ガンマ"},
+			{"Texture Filtering", "テクスチャフィルタリング"}, {"Monitor", "モニター"},
+			{"Trilinear", "トライリニア"}, {"Bilinear", "バイリニア"},
+			{"Resolution Scale", "解像度スケール"},
+			{"Controller Deadzone", "コントローラーのデッドゾーン"},
+			{"System Default", "システム既定"}, {"Audio Output", "オーディオ出力"},
+			{"Fit to Screen", "画面に合わせる"}, {"Aspect Ratio", "アスペクト比"},
+			{"GUI Scale", "GUIサイズ"}, {"GUI Style", "GUIスタイル"}, {"Modern", "モダン"},
+			{"Disable Controller When Unfocused", "非アクティブ時にコントローラーを無効化"},
+			{"Mouse Camera", "マウスカメラ"}, {"Mouse Sensitivity", "マウス感度"},
+			{"Dialogue Skip Controls", "セリフスキップ操作"}, {"Camera Invert", "カメラ反転"},
+			{"Press a button", "ボタンを押してください"},
+			{"Press a key or mouse button", "キーまたはマウスボタンを押してください"},
+			{"Speakers", "スピーカー"}, {"Stereo", "ステレオ"}, {"Mono", "モノラル"},
+			{"Music Volume", "音楽音量"},
+			{"Sound Effects", "効果音"}, {"Dialogue", "セリフ"},
+			{"Video...", "ビデオ..."}, {"Sound...", "サウンド..."},
+			{"Keyboard Mapping...", "キーボード設定..."},
+			{"Controller Mapping...", "コントローラー設定..."},
+			{"Reset Video Settings", "ビデオ設定をリセット"},
+			{"Reset Mappings", "操作設定をリセット"},
+			{"Exit to Desktop", "デスクトップに戻る"}, {"Are you sure?", "よろしいですか？"},
+			{"New Game", "ニューゲーム"}, {"Empty", "データなし"}, {"Unknown", "不明"},
+			{"Locked", "未解除"}
+		};
+		for (const JapanesePcText& translation : translations)
+		{
+			if (std::strcmp(english, translation.english) == 0)
+				return translation.japanese;
+		}
+	}
+	return ContentUiText(english, french, german, spanish, italian);
+}
+
+const char* PcOnOff(bool enabled)
+{
+	return enabled
+		? PcText("On", "Activé", "Ein", "Activado", "Attivo")
+		: PcText("Off", "Désactivé", "Aus", "Desactivado", "Disattivato");
+}
+
 constexpr const char* s_apchzKeyboardActions[BTN_MAX] =
 {
     "Move Up", "Move Down", "Move Left", "Move Right",
     "Square", "Circle", "Cross", "Triangle",
     "Start", "Select", "L1", "R1", "L2", "R2", "L3", "R3"
 };
+
+const char* PcKeyboardAction(int button)
+{
+	static constexpr const char* french[BTN_MAX] =
+	{
+		"Avancer", "Reculer", "Aller à gauche", "Aller à droite",
+		"Carré", "Cercle", "Croix", "Triangle", "Start", "Select",
+		"L1", "R1", "L2", "R2", "L3", "R3"
+	};
+	static constexpr const char* german[BTN_MAX] =
+	{
+		"Nach oben", "Nach unten", "Nach links", "Nach rechts",
+		"Quadrat", "Kreis", "Kreuz", "Dreieck", "Start", "Select",
+		"L1", "R1", "L2", "R2", "L3", "R3"
+	};
+	static constexpr const char* spanish[BTN_MAX] =
+	{
+		"Mover arriba", "Mover abajo", "Mover izquierda", "Mover derecha",
+		"Cuadrado", "Círculo", "Cruz", "Triángulo", "Start", "Select",
+		"L1", "R1", "L2", "R2", "L3", "R3"
+	};
+	static constexpr const char* italian[BTN_MAX] =
+	{
+		"Muovi su", "Muovi giù", "Muovi a sinistra", "Muovi a destra",
+		"Quadrato", "Cerchio", "Croce", "Triangolo", "Start", "Select",
+		"L1", "R1", "L2", "R2", "L3", "R3"
+	};
+	static constexpr const char* japanese[BTN_MAX] =
+	{
+		"上へ移動", "下へ移動", "左へ移動", "右へ移動",
+		"四角", "丸", "バツ", "三角", "START", "SELECT",
+		"L1", "R1", "L2", "R2", "L3", "R3"
+	};
+
+	if (button < 0 || button >= BTN_MAX)
+		return PcText("Unknown", "Inconnu", "Unbekannt", "Desconocido", "Sconosciuto");
+	if (!FLocalizedContent())
+		return s_apchzKeyboardActions[button];
+	switch (ContentPackage().language)
+	{
+	case CONTENT_LANGUAGE::French: return french[button];
+	case CONTENT_LANGUAGE::German: return german[button];
+	case CONTENT_LANGUAGE::Spanish: return spanish[button];
+	case CONTENT_LANGUAGE::Italian: return italian[button];
+	case CONTENT_LANGUAGE::Japanese: return japanese[button];
+	default: return s_apchzKeyboardActions[button];
+	}
+}
 
 int KeyboardKeyPressed(GLFWwindow* window)
 {
@@ -102,14 +214,14 @@ int GamepadBindingPressed()
 
 bool FGamepadAvailable()
 {
-    if (g_joy.gamepadConnected)
-        return true;
-    for (int jid = GLFW_JOYSTICK_1; jid <= GLFW_JOYSTICK_LAST; ++jid)
-    {
-        if (glfwJoystickPresent(jid))
-            return true;
-    }
-    return false;
+    return g_joy.gamepadConnected || FControllerInputAvailable();
+}
+
+int KeyboardOrMouseBindingPressed(GLFWwindow* window)
+{
+    // KeyboardKeyPressed also reports mouse buttons and the wheel
+    // (mouseinput.h binding codes).
+    return KeyboardKeyPressed(window);
 }
 
 bool FMappingPrompt(PRK prk)
@@ -173,12 +285,118 @@ PRD& PrdPrompt(PRK prk)
 		static_cast<int>(std::size(s_arespkKeyboardMapping)),
 		s_arespkKeyboardMapping
 	};
+	static RESPK languageResponses[6]{};
+	static PRD languageMenu =
+	{
+		"Language...", 1.0f, 1.0f, 1, 0, languageResponses
+	};
 
 	if (prk == PRK_KeyboardMapping)
 		return keyboardMapping;
 	if (prk == PRK_ControllerMapping)
 		return controllerMapping;
+	if (prk == PRK_LanguageMenu)
+	{
+		if (FJapaneseContent())
+		{
+			// Reuse the Italian response token as the Japanese voice choice;
+			// response IDs are retail ABI values and must not be renumbered.
+			languageResponses[0] = RESPK_LanguageItalian;
+			languageResponses[1] = RESPK_LanguageEnglish;
+			languageResponses[2] = RESPK_Back;
+			languageMenu.crespk = 3;
+			return languageMenu;
+		}
+		static constexpr RESPK responses[] =
+		{
+			RESPK_LanguageEnglish, RESPK_LanguageFrench, RESPK_LanguageGerman,
+			RESPK_LanguageSpanish, RESPK_LanguageItalian
+		};
+		languageMenu.crespk = 0;
+		for (int index = 0; index < 5; ++index)
+		{
+			if (FContentLanguageAvailable(static_cast<CONTENT_LANGUAGE>(index)))
+				languageResponses[languageMenu.crespk++] = responses[index];
+		}
+		languageResponses[languageMenu.crespk++] = RESPK_Back;
+		return languageMenu;
+	}
 	return s_mpprkprd[prk];
+}
+
+const char* PchzPromptTitle(PRK prk, const PRD& prd)
+{
+	if (!FLocalizedContent())
+		return prd.pchz;
+	if (prk >= PRK_PauseMenu && prk <= PRK_MtsFailedBestTime)
+	{
+		if (const char* localized = ContentLocalizedText(83 + static_cast<int>(prk)))
+			return localized;
+	}
+	if (prk == PRK_LanguageMenu)
+	{
+		if (const char* localized = ContentLocalizedText(116))
+			return localized;
+	}
+	if (prk == PRK_VideoMenu)
+		return PcText("Video", "Vidéo", "Video", "Vídeo", "Video");
+	if (prk == PRK_SoundMenu)
+		return PcText("Sound", "Son", "Sound", "Sonido", "Audio");
+	if (prk == PRK_ControlsMenu)
+		return PcText("Controls", "Commandes", "Steuerung", "Controles", "Comandi");
+	if (prk == PRK_KeyboardMapping)
+		return PcText("Keyboard Mapping", "Configuration du clavier", "Tastaturbelegung", "Asignación del teclado", "Configurazione tastiera");
+	if (prk == PRK_ControllerMapping)
+		return PcText("Controller Mapping", "Configuration de la manette", "Controllerbelegung", "Asignación del mando", "Configurazione controller");
+	if (prk == PRK_ExitToDesktopConfirm)
+		return PcText("Are you sure?", "Êtes-vous sûr ?", "Sind Sie sicher?", "¿Está seguro?", "Sei sicuro?");
+	return prd.pchz;
+}
+
+int PalResponseLocalizationIndex(RESPK respk, int variant)
+{
+	if (respk >= RESPK_Yes && respk <= RESPK_SaveGame)
+		return 117 + static_cast<int>(respk);
+	if (respk == RESPK_Quit)
+		return 136 + variant;
+	if (respk == RESPK_Vibration)
+		return 138 + variant;
+	if (respk == RESPK_CenterScreen)
+		return 126;
+	if (respk == RESPK_Music)
+		return 140 + variant;
+	if (respk == RESPK_Speakers)
+		return 142 + variant;
+	if (respk >= RESPK_Back && respk <= RESPK_Controls)
+		return 127 + (static_cast<int>(respk) - static_cast<int>(RESPK_Back));
+	if (respk >= RESPK_BinocInvert && respk <= RESPK_JetpackInvert)
+		return 144 + (static_cast<int>(respk) - static_cast<int>(RESPK_BinocInvert)) * 2 + variant;
+	// PAL stores these in locale-table order (English, French, Italian,
+	// German, Spanish), while the retail language prompt displays/selects
+	// English, French, German, Spanish, Italian.
+	switch (respk)
+	{
+	case RESPK_LanguageEnglish: return 150;
+	case RESPK_LanguageFrench: return 151;
+	case RESPK_LanguageGerman: return 153;
+	case RESPK_LanguageSpanish: return 154;
+	case RESPK_LanguageItalian: return 152;
+	default: break;
+	}
+	return -1;
+}
+
+const char* PalResponseText(RESPK respk, int variant)
+{
+	if (FJapaneseContent())
+	{
+		if (respk == RESPK_LanguageItalian)
+			return ContentLocalizedText(155); // 日本語
+		if (respk == RESPK_LanguageEnglish)
+			return ContentLocalizedText(150);
+	}
+	const int index = PalResponseLocalizationIndex(respk, variant);
+	return index >= 0 ? ContentLocalizedText(static_cast<std::size_t>(index)) : nullptr;
 }
 
 RESPK* ArespkPrompt(PRK prk, const PRD& prd)
@@ -202,6 +420,15 @@ int CrespkPrompt(PRK prk, const PRD& prd)
 	if (prd.fVertical != 0 && arespk != nullptr && crespk > 1 && arespk[crespk - 1] == RESPK_Back)
 		--crespk;
 	return crespk;
+}
+
+int VisiblePromptResponseCount(PRK prk, int responseCount)
+{
+	if (FMappingPrompt(prk))
+		return std::min(responseCount, 9);
+	if (prk == PRK_VideoMenu || prk == PRK_ControlsMenu)
+		return std::min(responseCount, 10);
+	return responseCount;
 }
 
 GLFWmonitor* ActiveMonitor()
@@ -252,18 +479,36 @@ std::vector<int> SupportedFrameRates()
     {
         int modeCount = 0;
         const GLFWvidmode* modes = glfwGetVideoModes(monitor, &modeCount);
+		bool supports50Fps = false;
 
         for (int i = 0; i < modeCount; ++i)
         {
             if (modes[i].refreshRate >= 30)
                 frameRates.push_back(modes[i].refreshRate);
+			if (modes[i].refreshRate >= 50)
+				supports50Fps = true;
         }
+		if (supports50Fps)
+			frameRates.push_back(50);
     }
 
     std::sort(frameRates.begin(), frameRates.end());
     frameRates.erase(std::unique(frameRates.begin(), frameRates.end()), frameRates.end());
 
     return frameRates;
+}
+
+std::vector<int> SupportedMsaaSamples()
+{
+	GLint maximum = 1;
+	glGetIntegerv(GL_MAX_SAMPLES, &maximum);
+	std::vector<int> samples{ 0 };
+	for (int sampleCount : { 2, 4, 8, 16 })
+	{
+		if (sampleCount <= maximum)
+			samples.push_back(sampleCount);
+	}
+	return samples;
 }
 
 void SelectSupportedFrameRate(int direction)
@@ -284,7 +529,7 @@ void SelectSupportedFrameRate(int direction)
 
 void SelectInternalResolution(int direction)
 {
-    constexpr int resolutions[] = { 0, 360, 480, 720, 1080, 1440, 2160 };
+    constexpr int resolutions[] = { 0, 360, 448, 480, 720, 1080, 1440, 2160 };
     auto current = std::find(std::begin(resolutions), std::end(resolutions),
         g_internalResolutionHeight);
     int index = current == std::end(resolutions)
@@ -293,9 +538,16 @@ void SelectInternalResolution(int direction)
     constexpr int count = static_cast<int>(std::size(resolutions));
     index = (index + (direction < 0 ? -1 : 1) + count) % count;
 	const int previousResolution = g_internalResolutionHeight;
+	const int previousScale = g_resolutionScalePercent;
 	g_internalResolutionHeight = resolutions[index];
+	if (g_internalResolutionHeight != 0)
+		g_resolutionScalePercent = 100;
 	if (!ApplyInternalResolutionSettings())
+	{
 		g_internalResolutionHeight = previousResolution;
+		g_resolutionScalePercent = previousScale;
+		ApplyInternalResolutionSettings();
+	}
 }
 
 void SelectGuiScale(int direction)
@@ -427,7 +679,9 @@ void HandlePromptPrkTransition(PROMPT* pprompt, PRK prkOld, PRK prkNew)
         // right icon for the controller / keyboard / mouse.
         if (MenuStyleValue(MSOPT_PromptBar) == 0)
         {
-            g_pnote.pvtblot->pfnSetBlotAchzDraw(&g_pnote, (char*)"&2S&.: Erase Game");
+            const char* eraseText = FLocalizedContent() ? ContentLocalizedText(157) : nullptr;
+            g_pnote.pvtblot->pfnSetBlotAchzDraw(&g_pnote,
+                const_cast<char*>(eraseText != nullptr ? eraseText : "&2S&.: Erase Game"));
             SetBlotDtVisible(&g_pnote, 0.0f);
             SetBlotFontScale(&g_pnote, 0.6f);
             g_pnote.pvtblot->pfnShowBlot(&g_pnote);
@@ -1426,6 +1680,11 @@ bool FRowDefaultInfo(PRK prk, RESPK respk, bool* pfDefault)
 		case RESPK_ButtonIcons: fDefault = QolButtonIcons() == 0; break;
 		case RESPK_RetailTiming: fDefault = FRetailTiming(); break;
 		case RESPK_CutsceneSkipControls: fDefault = !g_fSkipBinocDialogs; break;
+		case RESPK_AutoIconify: fDefault = !g_fAutoIconify; break;
+		case RESPK_OutputGamma: fDefault = std::abs(g_outputGamma - 1.0f) < 0.001f; break;
+		case RESPK_TextureFiltering: fDefault = g_textureFiltering != 0; break;
+		case RESPK_ResolutionScale: fDefault = g_resolutionScalePercent == 100; break;
+		case RESPK_ControllerDeadzone: fDefault = std::abs(g_controllerDeadzone - 0.35f) < 0.001f; break;
 		case RESPK_MusicVolume:
 		case RESPK_SfxVolume:
 		case RESPK_DialogueVolume:
@@ -1503,6 +1762,15 @@ bool ResetRowToDefault(PRK prk, RESPK respk)
 		case RESPK_ButtonIcons: SetQolButtonIcons(0); break;
 		case RESPK_RetailTiming: if (!FRetailTiming()) SetRetailTiming(true); break;
 		case RESPK_CutsceneSkipControls: g_fSkipBinocDialogs = false; SaveSystemSettings(); break;
+		case RESPK_AutoIconify: ApplyAutoIconifySettings(false); SaveSystemSettings(); break;
+		case RESPK_OutputGamma: ApplyOutputGammaSettings(1.0f); SaveSystemSettings(); break;
+		case RESPK_TextureFiltering: ApplyTextureFilteringSettings(1); SaveSystemSettings(); break;
+		case RESPK_ResolutionScale:
+			g_resolutionScalePercent = 100;
+			ApplyInternalResolutionSettings();
+			SaveSystemSettings();
+			break;
+		case RESPK_ControllerDeadzone: g_controllerDeadzone = 0.35f; SaveSystemSettings(); break;
 		case RESPK_MusicVolume:
 		case RESPK_SfxVolume:
 		case RESPK_DialogueVolume: SetNumericRow(respk, 100, false); break;
@@ -2198,7 +2466,9 @@ void SetPromptPrk(PROMPT* pprompt)
         else
         {
             const bool choosingSlot = prk == PRK_MemcardChooseNewSlot || prk == PRK_MemcardChooseLoadSlot;
-            std::snprintf(slotStrings[slot], 64, "%s", choosingSlot ? "New Game" : "Empty");
+            std::snprintf(slotStrings[slot], 64, "%s", choosingSlot
+				? PcText("New Game", "Nouvelle partie", "Neues Spiel", "Nueva partida", "Nuova partita")
+				: PcText("Empty", "Vide", "Leer", "Vacío", "Vuoto"));
         }
     }
 
@@ -2215,7 +2485,7 @@ void SetPromptPrk(PROMPT* pprompt)
 			? PchzGamepadBindingName(g_gamepadBindings[button])
 			: PchzKeyboardKeyName(g_keyboardBindings[button]);
 		std::snprintf(g_aachzKeyboardBindings[button], sizeof(g_aachzKeyboardBindings[button]),
-			"%s: %s", s_apchzKeyboardActions[button], bindingName);
+			"%s: %s", PcKeyboardAction(button), bindingName);
 	}
 	for (int k = 0; k < kExtraBindings; ++k)
 	{
@@ -2263,45 +2533,80 @@ void SetPromptPrk(PROMPT* pprompt)
         std::snprintf(g_achzRespk30, sizeof(g_achzRespk30),
             "Resolution: FSR (%d x %d)", g_gl.renderWidth, g_gl.renderHeight);
     }
+    else if (g_internalResolutionHeight == 0 && g_resolutionScalePercent != 100)
+    {
+        std::snprintf(g_achzRespk30, sizeof(g_achzRespk30),
+            "%s: %s %d%% (%d x %d)", PcText("Resolution", "Résolution", "Auflösung", "Resolución", "Risoluzione"),
+            PcText("Scaled", "Échelle", "Skaliert", "Escalada", "Scalata"), g_resolutionScalePercent,
+            g_gl.renderWidth, g_gl.renderHeight);
+    }
     else if (g_internalResolutionHeight == 0)
     {
         std::snprintf(g_achzRespk30, sizeof(g_achzRespk30),
-            "Resolution: Native (%d x %d)", g_gl.renderWidth, g_gl.renderHeight);
+            "%s: %s (%d x %d)", PcText("Resolution", "Résolution", "Auflösung", "Resolución", "Risoluzione"),
+			PcText("Native", "Native", "Nativ", "Nativa", "Nativa"), g_gl.renderWidth, g_gl.renderHeight);
     }
     else
     {
         std::snprintf(g_achzRespk30, sizeof(g_achzRespk30),
-            "Resolution: %d x %d", g_gl.renderWidth, g_gl.renderHeight);
+            "%s: %d x %d", PcText("Resolution", "Résolution", "Auflösung", "Resolución", "Risoluzione"), g_gl.renderWidth, g_gl.renderHeight);
     }
 
-    const char* fogName = g_fogType == 2 ? "PS3 Style" : "PS2 Style";
-    std::snprintf(g_achzRespk31, sizeof(g_achzRespk31), "Fog: %s", fogName);
+    const char* fogName = g_fogType == 2 ? "PS3" : "PS2";
+    std::snprintf(g_achzRespk31, sizeof(g_achzRespk31), "%s: %s", PcText("Fog", "Brouillard", "Nebel", "Niebla", "Nebbia"), fogName);
 
     const float drawDistance = g_drawDistanceMultiplier;
     const char* drawDistanceName = nullptr;
     if (drawDistance > 0.749f && drawDistance < 0.751f)
-        drawDistanceName = "Low";
+        drawDistanceName = PcText("Low", "Faible", "Niedrig", "Baja", "Bassa");
     else if (drawDistance > 0.999f && drawDistance < 1.001f)
-        drawDistanceName = "Original";
+        drawDistanceName = PcText("Original", "Originale", "Original", "Original", "Originale");
     else if (drawDistance > 1.499f && drawDistance < 1.501f)
-        drawDistanceName = "High";
+        drawDistanceName = PcText("High", "Élevée", "Hoch", "Alta", "Alta");
     else if (drawDistance > 1.999f && drawDistance < 2.001f)
-        drawDistanceName = "Very High";
+        drawDistanceName = PcText("Very High", "Très élevée", "Sehr hoch", "Muy alta", "Molto alta");
     else if (drawDistance > 2.999f && drawDistance < 3.001f)
-        drawDistanceName = "Extreme";
+        drawDistanceName = PcText("Extreme", "Extrême", "Extrem", "Extrema", "Estrema");
 
     if (drawDistanceName != nullptr)
-        std::snprintf(g_achzRespk32, sizeof(g_achzRespk32), "Draw Distance: %s", drawDistanceName);
+        std::snprintf(g_achzRespk32, sizeof(g_achzRespk32), "%s: %s", PcText("Draw Distance", "Distance d'affichage", "Sichtweite", "Distancia de dibujado", "Distanza di visualizzazione"), drawDistanceName);
     else
-        std::snprintf(g_achzRespk32, sizeof(g_achzRespk32), "Draw Distance: Custom (%.2fx)", drawDistance);
+        std::snprintf(g_achzRespk32, sizeof(g_achzRespk32), "%s: %s (%.2fx)", PcText("Draw Distance", "Distance d'affichage", "Sichtweite", "Distancia de dibujado", "Distanza di visualizzazione"), PcText("Custom", "Personnalisée", "Benutzerdefiniert", "Personalizada", "Personalizzata"), drawDistance);
 
-    constexpr const char* windowModeNames[] = { "Windowed", "Borderless", "Fullscreen" };
     const int windowModeIndex = (std::clamp)(static_cast<int>(g_windowMode), 0, 2);
-    std::snprintf(g_achzRespk33, sizeof(g_achzRespk33), "Window Mode: %s",
-        windowModeNames[windowModeIndex]);
+    const char* windowModeNames[] = {
+		PcText("Windowed", "Fenêtré", "Fenster", "Ventana", "Finestra"),
+		PcText("Borderless", "Sans bordure", "Randlos", "Sin bordes", "Senza bordi"),
+		PcText("Fullscreen", "Plein écran", "Vollbild", "Pantalla completa", "Schermo intero") };
+    std::snprintf(g_achzRespk33, sizeof(g_achzRespk33), "%s: %s",
+		PcText("Window Mode", "Mode d'affichage", "Fenstermodus", "Modo de ventana", "Modalità finestra"), windowModeNames[windowModeIndex]);
     std::snprintf(g_achzRespk34, sizeof(g_achzRespk34), "VSync: %s",
-        g_fVsync ? "On" : "Off");
-    const char* aspectRatioName = "Fit to Screen";
+		PcOnOff(g_fVsync));
+	std::snprintf(g_achzRespk69, sizeof(g_achzRespk69), "%s: %s",
+		PcText("Minimize When Unfocused", "Réduire en arrière-plan", "Bei Fokusverlust minimieren", "Minimizar en segundo plano", "Riduci in secondo piano"), PcOnOff(g_fAutoIconify));
+	if (g_anisotropicFiltering <= 1)
+		std::snprintf(g_achzRespk70, sizeof(g_achzRespk70), "%s: %s", PcText("Anisotropic Filtering", "Filtrage anisotrope", "Anisotrope Filterung", "Filtrado anisotrópico", "Filtro anisotropico"), PcOnOff(false));
+	else
+		std::snprintf(g_achzRespk70, sizeof(g_achzRespk70), "%s: %dx", PcText("Anisotropic Filtering", "Filtrage anisotrope", "Anisotrope Filterung", "Filtrado anisotrópico", "Filtro anisotropico"), g_anisotropicFiltering);
+	std::snprintf(g_achzRespk71, sizeof(g_achzRespk71), "%s: %d%%", PcText("Brightness / Gamma", "Luminosité / Gamma", "Helligkeit / Gamma", "Brillo / Gamma", "Luminosità / Gamma"),
+		static_cast<int>(std::lround(g_outputGamma * 100.0f)));
+	std::snprintf(g_achzRespk72, sizeof(g_achzRespk72), "%s: %s", PcText("Texture Filtering", "Filtrage des textures", "Texturfilterung", "Filtrado de texturas", "Filtro texture"),
+		g_textureFiltering != 0
+			? PcText("Trilinear", "Trilinéaire", "Trilinear", "Trilineal", "Trilineare")
+			: PcText("Bilinear", "Bilinéaire", "Bilinear", "Bilineal", "Bilineare"));
+	std::snprintf(g_achzRespk73, sizeof(g_achzRespk73), "%s: %s", PcText("Monitor", "Moniteur", "Monitor", "Monitor", "Monitor"),
+		VideoMonitorName(g_monitorIndex));
+	std::snprintf(g_achzRespk75, sizeof(g_achzRespk75), "%s: %d%%", PcText("Resolution Scale", "Échelle de résolution", "Auflösungsskalierung", "Escala de resolución", "Scala risoluzione"),
+		g_resolutionScalePercent);
+	std::snprintf(g_achzRespk76, sizeof(g_achzRespk76), "%s: %d%%", PcText("Controller Deadzone", "Zone morte de la manette", "Controller-Totzone", "Zona muerta del mando", "Zona morta controller"),
+		static_cast<int>(std::lround(g_controllerDeadzone * 100.0f)));
+	const std::string audioDeviceName = GetAudioOutputDeviceName();
+	const char* audioDeviceDisplay = audioDeviceName == "System Default"
+		? PcText("System Default", "Valeur système", "Systemstandard", "Predeterminado del sistema", "Predefinito di sistema")
+		: audioDeviceName.c_str();
+	std::snprintf(g_achzRespk77, sizeof(g_achzRespk77), "%s: %s", PcText("Audio Output", "Sortie audio", "Audioausgabe", "Salida de audio", "Uscita audio"),
+		audioDeviceDisplay);
+    const char* aspectRatioName = PcText("Fit to Screen", "Adapter à l'écran", "An Bildschirm anpassen", "Ajustar a pantalla", "Adatta allo schermo");
     if (g_gl.aspectMode == Fixed_16_9)
         aspectRatioName = "16:9";
     else if (g_gl.aspectMode == Fixed_16_10)
@@ -2312,8 +2617,8 @@ void SetPromptPrk(PROMPT* pprompt)
         aspectRatioName = "4:3 (PS2)";
     else if (g_gl.aspectMode == PS2_16_9)
         aspectRatioName = "16:9 (PS2)";
-    std::snprintf(g_achzRespk35, sizeof(g_achzRespk35), "Aspect Ratio: %s", aspectRatioName);
-    std::snprintf(g_achzRespk40, sizeof(g_achzRespk40), "GUI Scale: %d%%",
+    std::snprintf(g_achzRespk35, sizeof(g_achzRespk35), "%s: %s", PcText("Aspect Ratio", "Format d'image", "Seitenverhältnis", "Relación de aspecto", "Proporzioni"), aspectRatioName);
+    std::snprintf(g_achzRespk40, sizeof(g_achzRespk40), "%s: %d%%", PcText("GUI Scale", "Échelle de l'interface", "UI-Skalierung", "Escala de interfaz", "Scala interfaccia"),
         static_cast<int>(std::lround(g_guiScale * 100.0f)));
     std::snprintf(g_achzRespk60, sizeof(g_achzRespk60), "GUI Style: %s",
         g_guiStyle == GuiStyle_Modern ? "Modern" : "PS2");
@@ -2374,6 +2679,20 @@ void SetPromptPrk(PROMPT* pprompt)
         }
         break;
 
+		case PRK_LanguageMenu:
+		if (FJapaneseContent())
+			pprompt->irespk = ContentVoiceLanguage() == CONTENT_LANGUAGE::English ? 1 : 0;
+		else
+		{
+			pprompt->irespk = 0;
+			for (int index = 0; index < static_cast<int>(ContentPackage().language); ++index)
+			{
+				if (FContentLanguageAvailable(static_cast<CONTENT_LANGUAGE>(index)))
+					++pprompt->irespk;
+			}
+		}
+		break;
+
         default:
         break;
     }
@@ -2391,15 +2710,16 @@ void SetPromptPrk(PROMPT* pprompt)
     float titleHeight = 0.0f;
     float responseWidth = 0.0f;
 
-    if (prd.pchz != nullptr)
+    const char* const promptTitle = PchzPromptTitle(prk, prd);
+    if (promptTitle != nullptr)
     {
         pprompt->pfont->PushScaling(TitleBaseScale(prd), TitleBaseScale(prd));
         // GetExtents word-wraps by writing '\n' into the string, and titles are
         // string literals (read-only), so measure a writable copy.
-        std::string titleCopy(prd.pchz);
+        std::string titleCopy(promptTitle);
         pprompt->pfont->GetExtents(titleCopy.data(), &titleWidth, &titleHeight, 500.0f);
-        if (FMenuFontUsable(MenuStyleTtfFont(), prd.pchz))
-            titleWidth = DxPromptText(prd.pchz, pprompt->pfont);
+        if (FMenuFontUsable(MenuStyleTtfFont(), promptTitle))
+            titleWidth = DxPromptText(promptTitle, pprompt->pfont);
         pprompt->pfont->PopScaling();
 
         titleWidth = std::max(titleWidth, 0.0f);
@@ -2421,9 +2741,7 @@ void SetPromptPrk(PROMPT* pprompt)
     pprompt->pfont->PushScaling(RespkBaseScale(prd), RespkBaseScale(prd));
 
     const float lineHeight = static_cast<float>(pprompt->pfont->m_dyUnscaled) * pprompt->pfont->m_ryScale;
-    const bool isBindingMenu = FMappingPrompt(prk);
-    const int visibleResponseCount = isBindingMenu ? std::min(promptResponseCount, 9) : promptResponseCount;
-    float responseHeight = prd.fVertical != 0 ? lineHeight * static_cast<float>(visibleResponseCount) : lineHeight;
+    float responseHeight = prd.fVertical != 0 ? lineHeight * static_cast<float>(promptResponseCount) : lineHeight;
 
     if (promptResponseCount == 0)
         responseHeight = prd.fVertical != 0 ? 0.0f : lineHeight;
@@ -2454,12 +2772,16 @@ void SetPromptPrk(PROMPT* pprompt)
         {
             for (int variant = 0; variant < responseData.cpchz; ++variant)
             {
-                if (responseData.apchz[variant] == nullptr)
+                const char* variantText = FLocalizedContent()
+					? PalResponseText(response, variant) : nullptr;
+				if (variantText == nullptr)
+					variantText = responseData.apchz[variant];
+                if (variantText == nullptr)
                     continue;
 
                 itemWidth = std::max(itemWidth, fModernMeasure
-                    ? DxModernRow(response, responseData.apchz[variant], pprompt->pfont)
-                    : DxPromptText(responseData.apchz[variant], pprompt->pfont));
+                    ? DxModernRow(response, variantText, pprompt->pfont)
+                    : DxPromptText(variantText, pprompt->pfont));
             }
         }
 
@@ -2593,6 +2915,7 @@ void ExecutePrompt(PROMPT* pprompt, int direction)
         switch (response)
         {
         case RESPK_PauseOnFocusLoss: ToggleQolPauseOnFocusLoss(); break;
+        case RESPK_AutoIconify: ApplyAutoIconifySettings(!g_fAutoIconify); SaveSystemSettings(); break;
         case RESPK_Vibration: ToggleVibration(g_pgsCur); break;
         case RESPK_FpsCounter: ToggleDlssFpsCounter(); break;
         case RESPK_GuiStyle: SelectNextGuiStyle(); SaveSystemSettings(); break;
@@ -2835,13 +3158,13 @@ void ExecutePrompt(PROMPT* pprompt, int direction)
 
             case RESPK_Msaa:
             {
-                constexpr int samples[] = { 0, 2, 4, 8, 16 };
+				const std::vector<int> samples = SupportedMsaaSamples();
                 const int currentSamples = g_fMsaa ? g_msaaSamples : 0;
-                auto current = std::find(std::begin(samples), std::end(samples), currentSamples);
-                int index = current == std::end(samples)
+				auto current = std::find(samples.begin(), samples.end(), currentSamples);
+				int index = current == samples.end()
                     ? 0
-                    : static_cast<int>(current - std::begin(samples));
-                constexpr int count = static_cast<int>(std::size(samples));
+					: static_cast<int>(current - samples.begin());
+				const int count = static_cast<int>(samples.size());
                 index = (index + (direction < 0 ? -1 : 1) + count) % count;
                 g_fMsaa = samples[index] != 0;
                 if (g_fMsaa)
@@ -2899,6 +3222,100 @@ void ExecutePrompt(PROMPT* pprompt, int direction)
             BeginDisplayConfirm(pprompt, s_displayconfirm.before);
             return;
 
+			case RESPK_ResolutionScale:
+			{
+				constexpr int scales[] = { 50, 75, 100, 125, 150, 175, 200 };
+				auto current = std::find(std::begin(scales), std::end(scales), g_resolutionScalePercent);
+				int index = current == std::end(scales) ? 2 : static_cast<int>(current - std::begin(scales));
+				index = (index + (direction < 0 ? -1 : 1) + static_cast<int>(std::size(scales))) %
+					static_cast<int>(std::size(scales));
+				const int oldScale = g_resolutionScalePercent;
+				const int oldHeight = g_internalResolutionHeight;
+				g_resolutionScalePercent = scales[index];
+				g_internalResolutionHeight = 0;
+				if (!ApplyInternalResolutionSettings())
+				{
+					g_resolutionScalePercent = oldScale;
+					g_internalResolutionHeight = oldHeight;
+					ApplyInternalResolutionSettings();
+				}
+			}
+			SaveSystemSettings();
+			rebuildPromptKeepingSelection();
+			return;
+
+			case RESPK_OutputGamma:
+			// Confirm cycles forward, so wrap at either end.
+			if (direction >= 0 && g_outputGamma >= 1.499f)
+				ApplyOutputGammaSettings(0.50f);
+			else if (direction < 0 && g_outputGamma <= 0.501f)
+				ApplyOutputGammaSettings(1.50f);
+			else
+				ApplyOutputGammaSettings(g_outputGamma + (direction < 0 ? -0.05f : 0.05f));
+			SaveSystemSettings();
+			rebuildPromptKeepingSelection();
+			return;
+
+			case RESPK_TextureFiltering:
+			ApplyTextureFilteringSettings(g_textureFiltering == 0 ? 1 : 0);
+			SaveSystemSettings();
+			rebuildPromptKeepingSelection();
+			return;
+
+			case RESPK_Monitor:
+			ApplyMonitorSettings((g_monitorIndex + (direction < 0 ? -1 : 1) + VideoMonitorCount()) % VideoMonitorCount());
+			SaveSystemSettings();
+			rebuildPromptKeepingSelection();
+			return;
+
+			case RESPK_ResetVideo:
+			g_fMsaa = false;
+			g_msaaSamples = 1;
+			ApplyAnisotropicFilteringSettings(1);
+			ApplyTextureFilteringSettings(1);
+			ApplyOutputGammaSettings(1.0f);
+			g_targetFrameRate = FPalVideoStandard() ? 50 : 60;
+			g_internalResolutionHeight = 0;
+			g_resolutionScalePercent = 100;
+			g_drawDistanceMultiplier = 1.0f;
+			if (g_pcm != nullptr)
+				SetCmMrdRatio(g_pcm, g_drawDistanceMultiplier);
+			g_fVsync = true;
+			g_fogType = 1;
+			g_guiScale = 1.0f;
+			g_guiStyle = GuiStyle_PS2;
+			ApplyAutoIconifySettings(false);
+			ApplyMonitorSettings(0);
+			ApplyWindowModeSettings(WindowMode_Windowed);
+			ApplyAspectRatioSettings(FitToScreen);
+			ApplyMsaaSettings();
+			glfwSwapInterval(1);
+			glGlobShader.Use();
+			glUniform1i(glslFogType, g_fogType);
+			SaveSystemSettings();
+			rebuildPromptKeepingSelection();
+			return;
+
+			case RESPK_AnisotropicFiltering:
+			{
+				constexpr int levels[] = { 1, 2, 4, 8, 16 };
+				const int maximum = MaxSupportedAnisotropicFiltering();
+				std::vector<int> supported;
+				for (int level : levels)
+					if (level <= maximum)
+						supported.push_back(level);
+				auto current = std::find(supported.begin(), supported.end(),
+					g_anisotropicFiltering);
+				int index = current == supported.end()
+					? 0 : static_cast<int>(current - supported.begin());
+				index = (index + (direction < 0 ? -1 : 1) +
+					static_cast<int>(supported.size())) % static_cast<int>(supported.size());
+				ApplyAnisotropicFilteringSettings(supported[index]);
+			}
+			SaveSystemSettings();
+			rebuildPromptKeepingSelection();
+			return;
+
             case RESPK_Vsync:
             g_fVsync = !g_fVsync;
             glfwSwapInterval(g_fVsync ? 1 : 0);
@@ -2944,6 +3361,9 @@ void ExecutePrompt(PROMPT* pprompt, int direction)
 		case PRK_SoundMenu:
 		switch (response)
 		{
+			case RESPK_AudioOutputDevice:
+			SelectAudioOutputDevice(direction);
+			break;
 			case RESPK_Speakers:
 			SetUserStereoEnabled(!FUserStereoEnabled());
 			break;
@@ -3528,6 +3948,25 @@ void ExecutePrompt(PROMPT* pprompt, int direction)
 			SaveSystemSettings();
 			break;
 
+			case RESPK_MouseSensitivity:
+			g_mouseCameraSensitivity = std::clamp(
+				g_mouseCameraSensitivity + (direction < 0 ? -0.25f : 0.25f),
+				0.25f, 2.0f);
+			SaveSystemSettings();
+			break;
+
+			case RESPK_ControllerDeadzone:
+			// Confirm cycles forward, so wrap at either end.
+			if (direction >= 0 && g_controllerDeadzone >= 0.499f)
+				g_controllerDeadzone = 0.05f;
+			else if (direction < 0 && g_controllerDeadzone <= 0.051f)
+				g_controllerDeadzone = 0.50f;
+			else
+				g_controllerDeadzone = std::clamp(
+					g_controllerDeadzone + (direction < 0 ? -0.05f : 0.05f), 0.05f, 0.50f);
+			SaveSystemSettings();
+			break;
+
             case RESPK_BinocInvert:
             g_pgsCur->grfgs ^= 0x200;
             break;
@@ -3553,6 +3992,17 @@ void ExecutePrompt(PROMPT* pprompt, int direction)
 		{
 			s_iKeyboardBindingCapture = -1;
 			SetPrompt(pprompt, PRP_Basic, pprompt->prk == PRK_ControllerMapping ? PRK_ControllerSettings : PRK_ControlsMenu);
+			return;
+		}
+
+		if (response == RESPK_ResetMappings)
+		{
+			if (pprompt->prk == PRK_ControllerMapping)
+				ResetControllerBindings();
+			else
+				ResetKeyboardMouseBindings();
+			SaveSystemSettings();
+			rebuildPromptKeepingSelection();
 			return;
 		}
 
@@ -3617,21 +4067,68 @@ void HidePrompt(PROMPT* pprompt)
 
 const char* AchzFromRespk(RESPK respk)
 {
+	if (FLocalizedContent())
+	{
+		int variant = 0;
+		switch (respk)
+		{
+			case RESPK_Quit: variant = g_saveData.pgsCurrentSave != nullptr; break;
+			case RESPK_Vibration: variant = FVibrationEnabled(g_pgsCur) ? 0 : 1; break;
+			case RESPK_Music: variant = (g_pgsCur->grfgs & 0x80U) != 0; break;
+			case RESPK_Speakers: variant = (g_pgsCur->grfgs & 0x40U) != 0; break;
+			case RESPK_BinocInvert: variant = (g_pgsCur->grfgs & 0x200U) != 0; break;
+			case RESPK_TurretInvert: variant = (g_pgsCur->grfgs & 0x400U) != 0; break;
+			case RESPK_JetpackInvert: variant = (g_pgsCur->grfgs & 0x800U) != 0; break;
+			default: break;
+		}
+		if (const char* localized = PalResponseText(respk, variant))
+			return localized;
+	}
+
 	if (respk == RESPK_Speakers)
-		std::snprintf(g_achzRespk16, sizeof(g_achzRespk16), "Speakers: %s", FUserStereoEnabled() ? "Stereo" : "Mono");
+		std::snprintf(g_achzRespk16, sizeof(g_achzRespk16), "%s: %s",
+			PcText("Speakers", "Haut-parleurs", "Lautsprecher", "Altavoces", "Altoparlanti"),
+			FUserStereoEnabled()
+				? PcText("Stereo", "Stéréo", "Stereo", "Estéreo", "Stereo")
+				: PcText("Mono", "Mono", "Mono", "Mono", "Mono"));
 	else if (respk == RESPK_MusicVolume)
-		std::snprintf(g_achzRespk63, sizeof(g_achzRespk63), "Music Volume: %d%%", static_cast<int>(GetUserMusicVolume() * 100.0f + 0.5f));
+		std::snprintf(g_achzRespk63, sizeof(g_achzRespk63), "%s: %d%%", PcText("Music Volume", "Volume de la musique", "Musiklautstärke", "Volumen de música", "Volume musica"), static_cast<int>(GetUserMusicVolume() * 100.0f + 0.5f));
 	else if (respk == RESPK_SfxVolume)
-		std::snprintf(g_achzRespk64, sizeof(g_achzRespk64), "Sound Effects: %d%%", static_cast<int>(GetUserSfxVolume() * 100.0f + 0.5f));
+		std::snprintf(g_achzRespk64, sizeof(g_achzRespk64), "%s: %d%%", PcText("Sound Effects", "Effets sonores", "Soundeffekte", "Efectos de sonido", "Effetti sonori"), static_cast<int>(GetUserSfxVolume() * 100.0f + 0.5f));
 	else if (respk == RESPK_DialogueVolume)
-		std::snprintf(g_achzRespk65, sizeof(g_achzRespk65), "Dialogue: %d%%", static_cast<int>(GetUserDialogueVolume() * 100.0f + 0.5f));
+		std::snprintf(g_achzRespk65, sizeof(g_achzRespk65), "%s: %d%%", PcText("Dialogue", "Dialogues", "Dialog", "Diálogo", "Dialoghi"), static_cast<int>(GetUserDialogueVolume() * 100.0f + 0.5f));
+
+	if (FLocalizedContent())
+	{
+		switch (respk)
+		{
+		case RESPK_Video: return PcText("Video...", "Vidéo...", "Video...", "Vídeo...", "Video...");
+		case RESPK_Sound: return PcText("Sound...", "Son...", "Sound...", "Sonido...", "Audio...");
+		case RESPK_KeyboardMapping: return PcText("Keyboard Mapping...", "Configuration du clavier...", "Tastaturbelegung...", "Asignación del teclado...", "Configurazione tastiera...");
+		case RESPK_ControllerMapping: return PcText("Controller Mapping...", "Configuration de la manette...", "Controllerbelegung...", "Asignación del mando...", "Configurazione controller...");
+		case RESPK_ResetVideo: return PcText("Reset Video Settings", "Réinitialiser les paramètres vidéo", "Videoeinstellungen zurücksetzen", "Restablecer ajustes de vídeo", "Ripristina impostazioni video");
+		case RESPK_ResetMappings: return PcText("Reset Mappings", "Réinitialiser les commandes", "Belegung zurücksetzen", "Restablecer asignaciones", "Ripristina configurazione");
+		case RESPK_ExitToDesktop: return PcText("Exit to Desktop", "Quitter vers le bureau", "Zum Desktop beenden", "Salir al escritorio", "Esci al desktop");
+		default: break;
+		}
+	}
     return s_mprespkachz[respk];
 }
 
 void BuildSaveSlotText(GS* pgs, char* pchzDst)
 {
     int percentComplete = CalculatePercentCompletion(pgs);
-    const char* pchzLevel = PchzFriendlyFromLevelId((pgs->gameWorldCur << 8) | pgs->worldLevelCur);
+    const int levelId = (pgs->gameWorldCur << 8) | pgs->worldLevelCur;
+    const LEVELINFO* levelInfo = PlevelInfoFromId(levelId);
+    const char* pchzLevel = PchzFriendlyFromLevelId(levelId);
+    if (FLocalizedContent() && levelInfo != nullptr)
+    {
+        const std::ptrdiff_t levelIndexInTable = levelInfo - g_levelTable;
+        const char* localized = levelIndexInTable >= 0 && levelIndexInTable < 46
+            ? ContentLocalizedText(25 + static_cast<std::size_t>(levelIndexInTable)) : nullptr;
+        if (localized != nullptr)
+            pchzLevel = localized;
+    }
     int totalSeconds = std::max(static_cast<int>(pgs->dt / 60.0f), 1);
 
     std::snprintf(pchzDst, 64, "%d%% - %s - %d:%02d", percentComplete, pchzLevel, totalSeconds / 60, totalSeconds % 60);
@@ -3649,7 +4146,7 @@ void OnPromptActive(PROMPT* pprompt, int fActive)
         if (levelId == 0x0308)
         {
             ResumeVag();
-            ContinueMusicSequencer();
+            ContinueMusicSequencer(false);
         }
 
         if (levelId != 0x0308 &&
@@ -3673,6 +4170,9 @@ void OnPromptActive(PROMPT* pprompt, int fActive)
     if (levelId == 0x0308)
     {
         PauseVag();
+        // The PS2 pauses the Deadly Dance audio through s_sfxhVag.  The PC
+        // reconstruction splits that presentation between the VAG stream and
+        // the music sequencer, so both owners must stop to reproduce it.
         PauseMusicSequencer();
         SetUiUis(&g_ui, UIS_Paused);
     }
@@ -3834,7 +4334,7 @@ void UpdatePromptActive(PROMPT* pprompt, JOY* pjoy)
 
 		const int key = s_fControllerBindingCapture
 			? GamepadBindingPressed()
-			: KeyboardKeyPressed(g_gl.window);
+			: KeyboardOrMouseBindingPressed(g_gl.window);
 		const int noBinding = s_fControllerBindingCapture ? -1 : GLFW_KEY_UNKNOWN;
 		if (!s_fKeyboardBindingCaptureArmed)
 		{
@@ -4538,7 +5038,8 @@ void DrawPrompt(PROMPT* pprompt)
     // Prompt title
     // -------------------------------------------------------------------------
 
-    if (prd.pchz != nullptr)
+    const char* const promptTitle = PchzPromptTitle(pprompt->prk, prd);
+    if (promptTitle != nullptr)
     {
         const float titleScaleX = TitleBaseScale(prd) * uOn * promptScaleX;
         const float titleScaleY = TitleBaseScale(prd) * uOn * promptScaleY;
@@ -4551,8 +5052,8 @@ void DrawPrompt(PROMPT* pprompt)
         textBox.SetHorizontalJust(JH_Center);
         textBox.SetVerticalJust(JV_Top);
 
-        CRichText titleText(prd.pchz, pprompt->pfont);
-        CRichText titleShadow(prd.pchz, pprompt->pfont);
+        CRichText titleText(const_cast<char*>(promptTitle), pprompt->pfont);
+        CRichText titleShadow(const_cast<char*>(promptTitle), pprompt->pfont);
 
         // Wrap long titles first (on these copies) so they draw on several lines.
         const float dyTitle = titleText.DyWrap(500.0f * promptScaleX);
@@ -4959,7 +5460,7 @@ void DrawPrompt(PROMPT* pprompt)
     // Title/response divider
     // -------------------------------------------------------------------------
 
-    if (prd.pchz != nullptr && promptResponseCount > 0 && MenuStyleValue(MSOPT_Divider) != 0)
+    if (promptTitle != nullptr && promptResponseCount > 0 && MenuStyleValue(MSOPT_Divider) != 0)
     {
         const glm::vec4 dividerColor(95.0f * kGsColorScale, 95.0f * kGsColorScale, 95.0f * kGsColorScale, alpha);
 

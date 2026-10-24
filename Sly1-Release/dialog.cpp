@@ -14,9 +14,24 @@
 #include "cplook.h"
 #include "sw.h"
 #include "pzo.h"
-#include <array>
 #include <cstdio>
-#include <cstring>
+#include <stdexcept>
+
+namespace
+{
+std::size_t Utf8CharacterCount(const char* text)
+{
+	std::size_t count = 0;
+	for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text);
+		*cursor != '\0'; ++cursor)
+	{
+		// UTF-8 continuation bytes do not begin a displayed code point.
+		if ((*cursor & 0xc0) != 0x80)
+			++count;
+	}
+	return count;
+}
+}
 
 DIALOG* NewDialog()
 {
@@ -131,11 +146,16 @@ void CloneDialog(DIALOG* pdialog, DIALOG* pdialogBase)
 
     pdialog->fDefault = pdialogBase->fDefault;
     pdialog->fCrucial = pdialogBase->fCrucial;
+    pdialog->oidPntAnchorDefault = pdialogBase->oidPntAnchorDefault;
+    pdialog->fNoSkip = pdialogBase->fNoSkip;
+    pdialog->fConfrontAudio = pdialogBase->fConfrontAudio;
 }
 
 void LoadDialogEventsFromBrx(DIALOG* pdialog, CBinaryInputStream* pbis, int* pcde, std::vector<DE>& ade)
 {
 	*pcde = pbis->S8Read();
+	if (*pcde < 0 || *pcde > 127)
+		throw std::runtime_error("invalid PCBRX dialog event count");
 
 	ade.clear();
 	ade.resize(*pcde);
@@ -150,27 +170,8 @@ void LoadDialogEventsFromBrx(DIALOG* pdialog, CBinaryInputStream* pbis, int* pcd
 		{
 			case DEK_PreloadVag:
 			case DEK_ShowMovie:
-			{
-				std::array<uint32_t, 8> descriptor{};
-				bool fDescriptorPresent = false;
-				for (uint32_t& word : descriptor)
-				{
-					word = pbis->U32Read();
-					fDescriptorPresent |= word != 0;
-				}
-
-				if (fDescriptorPresent)
-				{
-					pde->string.pchz = std::shared_ptr<char[]>(new char[33]());
-					std::memcpy(pde->string.pchz.get(), descriptor.data(), 32);
-				}
-				else
-				{
-					pde->string.pchz.reset();
-				}
-
-				break;
-			}
+			pde->string.pchz = pbis->ReadFixedString32();
+			break;
 
 			case DEK_SpeakerLeft:
 			case DEK_SpeakerRight:
@@ -197,6 +198,9 @@ void LoadDialogEventsFromBrx(DIALOG* pdialog, CBinaryInputStream* pbis, int* pcd
 			case DEK_ShowLetterbox:
 			case DEK_HideLetterbox:
 			break;
+
+			default:
+			throw std::runtime_error("unsupported PCBRX dialog event type");
 		}
 	}
 }
@@ -752,6 +756,7 @@ void UpdateDialog(DIALOG* pdialog, float dt)
 
 			if (g_fSkipBinocDialogs &&
 				g_binoc.pdialogPlaying == pdialog &&
+				pdialog->fNoSkip == 0 &&
 				!FDialogSkipProtected(pdialog) &&
 				fSkipPressed)
 			{
@@ -835,7 +840,7 @@ void HandleDialogEvent(DIALOG* pdialog, DE* pde)
 	{
 		case DEK_PreloadVag:
 		{
-			PreloadVagDescriptor(pde->string.pchz.get());
+			PreloadVagFileName(pde->string.pchz.get());
 			dp.grfdp |= GRFDP_VagPreloaded;
 			break;
 		}
@@ -923,14 +928,18 @@ void HandleDialogEvent(DIALOG* pdialog, DE* pde)
 			if (pchzText && pchzText[0] != '\0')
 			{
 				g_binoc.pvtblot->pfnSetBlotAchzDraw(&g_binoc, pchzText);
-				g_binoc.rgbaText = pspeaker ? pspeaker->rgbaText : glm::vec4(128.0f / 255.0f);
+				g_binoc.rgbaText = pspeaker
+					? pspeaker->rgbaText
+					: glm::vec4(1.0f, 1.0f, 1.0f, 128.0f / 255.0f);
 
 				float dtText = talk.dtPause;
 
 				if (dp.pasegaLipsync && talk.oidLipsAseg != OID_Nil)
 					dtText = dp.pasegaLipsync->paseg->tMax;
 
-				g_binoc.svch = dtText > 0.0f ? static_cast<float>(std::strlen(pchzText) + 10) / dtText : 15.0f;
+				g_binoc.svch = dtText > 0.0f
+					? static_cast<float>(Utf8CharacterCount(pchzText) + 10) / dtText
+					: 15.0f;
 				dp.grfdp |= GRFDP_Text;
 			}
 
@@ -993,7 +1002,7 @@ void HandleDialogEvent(DIALOG* pdialog, DE* pde)
 
 		case DEK_ShowMovie:
 		{
-			QueueCutsceneDescriptor(pde->string.pchz.get());
+			QueueCutsceneFileName(pde->string.pchz.get());
 			break;
 		}
 

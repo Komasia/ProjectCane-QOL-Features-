@@ -34,11 +34,46 @@ int s_windowedY = 100;
 int s_windowedWidth = 800;
 int s_windowedHeight = 800;
 bool s_lastFramebufferResizeSucceeded = true;
+double s_autoIconifySuppressedUntil = 0.0;
+
+GLFWmonitor* MonitorByIndex(int index)
+{
+	int count = 0;
+	GLFWmonitor** monitors = glfwGetMonitors(&count);
+	if (monitors == nullptr || count == 0)
+		return glfwGetPrimaryMonitor();
+	return monitors[(std::clamp)(index, 0, count - 1)];
+}
 
 void GlfwErrorCallback(int error, const char* description)
 {
 	ReportRuntimeError("Graphics", "GLFW error %d: %s", error,
 		description != nullptr ? description : "No description was provided");
+}
+
+void WindowFocusCallback(GLFWwindow* window, int focused)
+{
+	if (focused == GLFW_FALSE && g_fAutoIconify &&
+		glfwGetTime() >= s_autoIconifySuppressedUntil &&
+		glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_FALSE)
+	{
+		// GLFW_AUTO_ICONIFY only covers exclusive fullscreen windows. Apply the
+		// user-facing setting explicitly so windowed and borderless modes behave
+		// the same way when the game loses focus.
+		glfwIconifyWindow(window);
+	}
+	else if (focused == GLFW_TRUE)
+	{
+		// A minimized GLFW window can report a zero-sized drawable. Windows does
+		// not consistently follow focus restoration with another framebuffer-size
+		// callback for borderless windows, so explicitly restore the render targets
+		// from the current drawable dimensions.
+		int framebufferWidth = 0;
+		int framebufferHeight = 0;
+		glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+		if (framebufferWidth > 0 && framebufferHeight > 0)
+			FrameBufferSizeCallBack(window, framebufferWidth, framebufferHeight);
+	}
 }
 
 GLFWmonitor* MonitorForWindow(GLFWwindow* window)
@@ -89,6 +124,7 @@ void GL::InitGL()
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+	glfwWindowHint(GLFW_AUTO_ICONIFY, g_fAutoIconify ? GLFW_TRUE : GLFW_FALSE);
 
 	width  = 1280;
 	height = 720;
@@ -119,6 +155,7 @@ void GL::InitGL()
 
 	glfwMakeContextCurrent(window);
 	glfwSetFramebufferSizeCallback(window, FrameBufferSizeCallBack);
+	glfwSetWindowFocusCallback(window, WindowFocusCallback);
 	glfwSetCursorPosCallback(window, MOUSE::CursorPosCallback);
 	glfwSetMouseButtonCallback(window, MOUSE::MouseButtonCallback);
 	glfwSetScrollCallback(window, MOUSE::MouseWheelCallback);
@@ -348,6 +385,7 @@ void GL::InitGL()
 	glScreenShader.Init("screen.vert", NULL, "screen.frag");
 	glScreenShader.Use();
 	glUniform1i(glGetUniformLocation(glScreenShader.ID, "screenTexture"), 0);
+	glUniform1f(glGetUniformLocation(glScreenShader.ID, "outputGamma"), g_outputGamma);
 
 	glDyshadow.Init("dysh.vert", NULL, "dysh.frag");
 	glDyshadow.Use();
@@ -476,11 +514,9 @@ void GL::InitGL()
 
 	glslfPose       = glGetUniformLocation(glGlobShader.ID, "fPose");
 	glslPoseCount   = glGetUniformLocation(glGlobShader.ID, "poseCount");
-	glslPoseWeights = glGetUniformLocation(glGlobShader.ID, "poseWeights[0]");
 
 	glslCelPose        = glGetUniformLocation(glCelBorderShader.ID, "fPose");
 	glslCelPoseCount   = glGetUniformLocation(glCelBorderShader.ID, "poseCount");
-	glslCelPoseWeights = glGetUniformLocation(glCelBorderShader.ID, "poseWeights[0]");
 }
 
 namespace
@@ -1036,17 +1072,18 @@ bool ApplyInternalResolutionSettings()
 
 static bool s_fFullscreenBorderless = false;
 
-void ApplyWindowModeSettings(WindowMode mode)
+bool ApplyWindowModeSettings(WindowMode mode)
 {
+	if (g_gl.window == nullptr)
+		return false;
+
 	// DLSS Frame Generation cannot present over exclusive OpenGL fullscreen,
 	// so "Fullscreen" becomes a borderless window covering the monitor then.
 	const bool fBorderlessFs = mode == WindowMode_Fullscreen && FDlssNeedsBorderlessFullscreen();
-	if (g_gl.window == nullptr || (mode == g_windowMode && fBorderlessFs == s_fFullscreenBorderless))
-		return;
 
-	GLFWmonitor* monitor = MonitorForWindow(g_gl.window);
+	GLFWmonitor* monitor = MonitorByIndex(g_monitorIndex);
 	if (monitor == nullptr)
-		return;
+		return false;
 
 	if (g_windowMode == WindowMode_Windowed)
 	{
@@ -1054,6 +1091,11 @@ void ApplyWindowModeSettings(WindowMode mode)
 		glfwGetWindowSize(g_gl.window, &s_windowedWidth, &s_windowedHeight);
 	}
 
+	// Some window systems deliver the focus event from a monitor/mode change
+	// later, during event polling. Cover that delayed event as well as callbacks
+	// delivered synchronously by GLFW.
+	s_autoIconifySuppressedUntil = glfwGetTime() + 0.5;
+	glfwGetError(nullptr);
 	if (mode == WindowMode_Windowed)
 	{
 		glfwSetWindowAttrib(g_gl.window, GLFW_DECORATED, GLFW_TRUE);
@@ -1067,7 +1109,7 @@ void ApplyWindowModeSettings(WindowMode mode)
 		glfwGetMonitorPos(monitor, &x, &y);
 		const GLFWvidmode* videoMode = glfwGetVideoMode(monitor);
 		if (videoMode == nullptr)
-			return;
+			return false;
 
 		// Borderless is a fullscreen-sized window, not a work-area-sized window.
 		// The work area excludes the taskbar and left a visible strip along the
@@ -1080,7 +1122,7 @@ void ApplyWindowModeSettings(WindowMode mode)
 	{
 		const GLFWvidmode* videoMode = glfwGetVideoMode(monitor);
 		if (videoMode == nullptr)
-			return;
+			return false;
 		int x = 0;
 		int y = 0;
 		glfwGetMonitorPos(monitor, &x, &y);
@@ -1091,19 +1133,112 @@ void ApplyWindowModeSettings(WindowMode mode)
 	{
 		const GLFWvidmode* videoMode = glfwGetVideoMode(monitor);
 		if (videoMode == nullptr)
-			return;
+			return false;
 		glfwSetWindowAttrib(g_gl.window, GLFW_DECORATED, GLFW_TRUE);
 		glfwSetWindowMonitor(g_gl.window, monitor, 0, 0,
 			videoMode->width, videoMode->height, videoMode->refreshRate);
 	}
+	if (glfwGetError(nullptr) != GLFW_NO_ERROR)
+		return false;
 
 	s_fFullscreenBorderless = fBorderlessFs;
 	g_windowMode = mode;
 	glfwSwapInterval(g_fVsync ? 1 : 0);
+	return true;
 }
 
-void ApplyAspectRatioSettings(AspectMode mode)
+void UpdateWindowModeForDlss()
 {
+	// Re-applies "Fullscreen" only when DLSS Frame Generation switched between
+	// needing a borderless window and exclusive fullscreen.
+	if (g_gl.window == nullptr || g_windowMode != WindowMode_Fullscreen)
+		return;
+	if (FDlssNeedsBorderlessFullscreen() != s_fFullscreenBorderless)
+		ApplyWindowModeSettings(g_windowMode);
+}
+
+int VideoMonitorCount()
+{
+	int count = 0;
+	glfwGetMonitors(&count);
+	return (std::max)(count, 1);
+}
+
+const char* VideoMonitorName(int monitorIndex)
+{
+	GLFWmonitor* monitor = MonitorByIndex(monitorIndex);
+	const char* name = monitor != nullptr ? glfwGetMonitorName(monitor) : nullptr;
+	return name != nullptr ? name : "Primary Monitor";
+}
+
+int VideoMonitorIndexByName(const char* name)
+{
+	if (name == nullptr || *name == '\0')
+		return -1;
+	int count = 0;
+	GLFWmonitor** monitors = glfwGetMonitors(&count);
+	for (int i = 0; monitors != nullptr && i < count; ++i)
+	{
+		const char* candidate = glfwGetMonitorName(monitors[i]);
+		if (candidate != nullptr && std::strcmp(candidate, name) == 0)
+			return i;
+	}
+	return -1;
+}
+
+bool ApplyMonitorSettings(int monitorIndex)
+{
+	const int previousMonitor = g_monitorIndex;
+	g_monitorIndex = (std::clamp)(monitorIndex, 0, VideoMonitorCount() - 1);
+	if (!ApplyWindowModeSettings(g_windowMode))
+	{
+		g_monitorIndex = previousMonitor;
+		return false;
+	}
+	if (g_windowMode == WindowMode_Windowed && g_gl.window != nullptr)
+	{
+		GLFWmonitor* monitor = MonitorByIndex(g_monitorIndex);
+		if (monitor == nullptr)
+			return false;
+		int x = 0, y = 0, width = 0, height = 0;
+		int windowWidth = 0, windowHeight = 0;
+		glfwGetMonitorWorkarea(monitor, &x, &y, &width, &height);
+		glfwGetWindowSize(g_gl.window, &windowWidth, &windowHeight);
+		s_windowedX = x + (width - windowWidth) / 2;
+		s_windowedY = y + (height - windowHeight) / 2;
+		s_autoIconifySuppressedUntil = glfwGetTime() + 0.5;
+		glfwGetError(nullptr);
+		glfwSetWindowPos(g_gl.window, s_windowedX, s_windowedY);
+		if (glfwGetError(nullptr) != GLFW_NO_ERROR)
+		{
+			g_monitorIndex = previousMonitor;
+			return false;
+		}
+	}
+	return true;
+}
+
+void ApplyOutputGammaSettings(float gamma)
+{
+	g_outputGamma = std::clamp(gamma, 0.50f, 1.50f);
+	if (glScreenShader.ID != 0)
+	{
+		glScreenShader.Use();
+		glUniform1f(glGetUniformLocation(glScreenShader.ID, "outputGamma"), g_outputGamma);
+	}
+}
+
+void ApplyAutoIconifySettings(bool enabled)
+{
+	g_fAutoIconify = enabled;
+	if (g_gl.window != nullptr)
+		glfwSetWindowAttrib(g_gl.window, GLFW_AUTO_ICONIFY, enabled ? GLFW_TRUE : GLFW_FALSE);
+}
+
+bool ApplyAspectRatioSettings(AspectMode mode)
+{
+	const AspectMode previousMode = g_gl.aspectMode;
+	const float previousAspect = g_gl.aspectRatio;
 	g_gl.aspectMode = mode;
 	switch (mode)
 	{
@@ -1115,11 +1250,22 @@ void ApplyAspectRatioSettings(AspectMode mode)
 		case FitToScreen:
 		default: break;
 	}
+	if (ApplyInternalResolutionSettings())
+		return true;
+	g_gl.aspectMode = previousMode;
+	g_gl.aspectRatio = previousAspect;
 	ApplyInternalResolutionSettings();
+	return false;
 }
 
 void FrameBufferSizeCallBack(GLFWwindow* window, int width, int height)
 {
+	// GLFW reports a 0x0 framebuffer while a window is minimized. Rebuilding
+	// every render target as 1x1 here can leave borderless mode black after an
+	// Alt+Tab when the platform omits a matching restore-size notification.
+	if (width <= 0 || height <= 0)
+		return;
+
 	constexpr float kVirtualUiWidth = 640.0f;
 	constexpr float kVirtualUiHeight = 492.80002f;
 
@@ -1173,9 +1319,20 @@ void FrameBufferSizeCallBack(GLFWwindow* window, int width, int height)
 	else if (g_internalResolutionHeight > 0)
 	{
 		sceneH = g_internalResolutionHeight;
-		sceneW = std::max(1, static_cast<int>(std::lround(
-			static_cast<double>(sceneH) * static_cast<double>(presentW) /
-			static_cast<double>(presentH))));
+		// The original PS2 raster is explicitly 640x448. Other internal
+		// resolutions preserve the selected presentation aspect ratio.
+		if (sceneH == 448)
+			sceneW = 640;
+		else
+			sceneW = std::max(1, static_cast<int>(std::lround(
+				static_cast<double>(sceneH) * static_cast<double>(presentW) /
+				static_cast<double>(presentH))));
+	}
+	else if (g_resolutionScalePercent != 100)
+	{
+		const float scale = static_cast<float>(g_resolutionScalePercent) * 0.01f;
+		sceneW = (std::max)(1, static_cast<int>(std::lround(presentW * scale)));
+		sceneH = (std::max)(1, static_cast<int>(std::lround(presentH * scale)));
 	}
 
 	// UI and HUD layout always use the actual output size. Only the scene
@@ -1271,9 +1428,14 @@ GLuint g_sceneFbo = 0;
 int g_msaaSamples = 4;
 bool g_fMsaa = false;
 int g_internalResolutionHeight = 0;
+int g_resolutionScalePercent = 100;
+int g_monitorIndex = 0;
+int g_textureFiltering = 1;
+float g_outputGamma = 1.0f;
 float g_guiScale = 1.0f;
 GuiStyle g_guiStyle = GuiStyle_PS2;
 WindowMode g_windowMode = WindowMode_Windowed;
+bool g_fAutoIconify = false;
 float g_drawDistanceMultiplier = 1.0f;
 int g_frames = 3;
 float s_dxDisplay;
@@ -1286,7 +1448,5 @@ GLuint glslfSkin = 0;
 GLint glslCelSkin = 0;
 GLuint glslfPose = 0;
 GLuint glslPoseCount = 0;
-GLuint glslPoseWeights = 0;
 GLuint glslCelPose = 0;
 GLuint glslCelPoseCount = 0;
-GLuint glslCelPoseWeights = 0;

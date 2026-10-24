@@ -117,6 +117,9 @@
     <ClCompile Include="transition.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="content.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="so.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -963,6 +966,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="transition.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="content.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="tn.h">

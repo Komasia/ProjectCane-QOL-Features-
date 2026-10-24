@@ -130,11 +130,13 @@ double MOUSE::GetScrollDY() {
 
 // get button state
 bool MOUSE::Button(int button) {
-    return buttons[button];
+    return button >= 0 && button <= GLFW_MOUSE_BUTTON_LAST && buttons[button];
 }
 
 // return if button changed then reset it in the changed array
 bool MOUSE::ButtonChanged(int button) {
+    if (button < 0 || button > GLFW_MOUSE_BUTTON_LAST)
+        return false;
     bool ret = buttonsChanged[button];
     // set to false because change no longer new
     buttonsChanged[button] = false;

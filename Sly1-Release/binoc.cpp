@@ -1,10 +1,12 @@
 #include "binoc.h"
 #include "gl.h"
+#include "content.h"
 #include "aseg.h"
 #include "totals.h"
 #include "pzo.h"
 #include "tv.h"
 #include "cplook.h"
+#include "mouse.h"
 
 namespace
 {
@@ -771,6 +773,27 @@ void UpdateBinocActive(BINOC* pbinoc, JOY* pjoy)
             yReticle = -yReticle;
 
         glm::vec3 posCur(pbinoc->dxReticle, pbinoc->dyReticle, 0.0f);
+        const bool useMouse = g_fMouseCamera && g_gl.window != nullptr &&
+            !g_fDisableInput &&
+            glfwGetWindowAttrib(g_gl.window, GLFW_FOCUSED) == GLFW_TRUE;
+        if (useMouse)
+        {
+            // Binoculars use a free reticle rather than the camera's angular
+            // target. Apply relative mouse motion directly so releasing the
+            // mouse leaves the reticle where the player placed it.
+            constexpr float kReticleUnitsPerPixel = 0.22f;
+            const float mouseX = static_cast<float>(MOUSE::GetDX()) *
+                kReticleUnitsPerPixel * g_mouseCameraSensitivity;
+            float mouseY = static_cast<float>(MOUSE::GetDY()) *
+                kReticleUnitsPerPixel * g_mouseCameraSensitivity;
+            if ((g_pgsCur->grfgs & 512U) != 0)
+                mouseY = -mouseY;
+            pbinoc->dxReticle = std::clamp(pbinoc->dxReticle + mouseX, -50.0f, 50.0f);
+            pbinoc->dyReticle = std::clamp(pbinoc->dyReticle + mouseY, -50.0f, 50.0f);
+            pbinoc->uCompassBarOffset = GModPositive(
+                pbinoc->uCompassBarOffset - mouseX * 0.0016f, 1.0f);
+            posCur = glm::vec3(pbinoc->dxReticle, pbinoc->dyReticle, 0.0f);
+        }
         glm::vec3 posTarget(xReticle * 50.0f, yReticle * 50.0f, 0.0f);
 
         SMP* psmp = pjoy->uDeflect + pjoy->uDeflect2 > 0.0001f ? &smpReticle : &smpReticleFast;
@@ -779,7 +802,10 @@ void UpdateBinocActive(BINOC* pbinoc, JOY* pjoy)
         // optional velocity output. Using that output as the position makes
         // the reticle alternate between positive and negative velocity every
         // frame, which appears as doubled/quadrupled reticles in motion.
-        const glm::vec3 posNew = PosSmooth(posCur, posTarget, g_clock.dt, psmp, nullptr);
+        const glm::vec3 posNew = useMouse &&
+            pjoy->uDeflect + pjoy->uDeflect2 <= 0.0001f
+            ? posCur
+            : PosSmooth(posCur, posTarget, g_clock.dt, psmp, nullptr);
 
         pbinoc->dxReticle = posNew.x;
         pbinoc->dyReticle = posNew.y;
@@ -813,6 +839,13 @@ void OnBinocActive(BINOC* pbinoc, int fActive)
 
     pbinoc->fActive = fActive;
     pbinoc->fTargeting = 0;
+
+    if (g_fMouseCamera && g_gl.window != nullptr)
+    {
+        glfwSetInputMode(g_gl.window, GLFW_CURSOR,
+            fActivate ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        MOUSE::ResetDelta();
+    }
 
     if (!fActivate)
     {
@@ -858,14 +891,15 @@ void SetBinocAchzDraw(BINOC* pbinoc, char* pchz)
     pbinoc->cichLR = 0;  // Reset line break counter
 
     if (pchz && *pchz != '\0') {
-        strcpy(pbinoc->achzDraw, pchz);
-
         // Choose scaling based on Binoc mode
         float scale = (pbinoc->binocs == BINOCS_Confront) ? 0.8f : 1.0f;
         pbinoc->pfont->PushScaling(scale, scale);
 
-        // Wrap rich text for this string
-        CRichText rt(pbinoc->achzDraw, pbinoc->pfont);
+        // CRichText converts UTF-8 localization text to the game's compact
+        // font encoding. Do that before touching BLOT::achzDraw: Japanese
+        // UTF-8 can exceed the 512-byte draw buffer even though the converted
+        // glyph stream comfortably fits it.
+        CRichText rt(pchz, pbinoc->pfont);
 
         // Choose wrap width based on Binoc mode
         float wrapWidth = (pbinoc->binocs == BINOCS_Confront) ? 380.0f : 280.0f;
@@ -875,7 +909,7 @@ void SetBinocAchzDraw(BINOC* pbinoc, char* pchz)
         // CRichText owns a writable copy so that wrapping string literals is
         // safe. Binocular dialog, however, intentionally keeps the wrapped
         // text in its BLOT buffer for type-on and later drawing.
-        std::strcpy(pbinoc->achzDraw, rt.m_achz);
+        std::snprintf(pbinoc->achzDraw, sizeof(pbinoc->achzDraw), "%s", rt.m_achz);
 
         // Reset parser and extract line break indices
         rt.Reset();
@@ -1782,10 +1816,14 @@ void DrawBinocZoom(BINOC* pbinoc)
 
                 tbx.m_x = originX + 215.0f * sx;
                 tbx.m_y = originY + 390.80002f * sy;
-                labelFont->DrawPchz((char*)"Move", &tbx);
+                const char* moveText = FLocalizedContent() ? ContentLocalizedText(79) : nullptr;
+                const char* moveFallback = FJapaneseContent() ? "移動" : "Move";
+                labelFont->DrawPchz(const_cast<char*>(moveText != nullptr ? moveText : moveFallback), &tbx);
 
                 tbx.m_x = originX + 425.0f * sx;
-                labelFont->DrawPchz((char*)"Zoom", &tbx);
+                const char* zoomText = FLocalizedContent() ? ContentLocalizedText(80) : nullptr;
+                const char* zoomFallback = FJapaneseContent() ? "ズーム" : "Zoom";
+                labelFont->DrawPchz(const_cast<char*>(zoomText != nullptr ? zoomText : zoomFallback), &tbx);
 
                 labelFont->PopScaling();
             }

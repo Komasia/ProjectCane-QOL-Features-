@@ -23,6 +23,30 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\AssetWalker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\BinaryInputStream.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\BrxWalker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\GeometryWalker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\ObjectWalker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\OptionWalker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\SpliceWalker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\TriangleList.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="DialogAudioTable.inc">

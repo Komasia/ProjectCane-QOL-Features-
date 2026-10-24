@@ -11,16 +11,25 @@
 #include "sound.h"
 #include "jt.h"
 #include "actseg.h"
+#include "aseg.h"
+#include "acp.h"
+#include "acr.h"
+#include "acs.h"
+#include "acg.h"
 #include "save.h"
 #include "fmv.h"
 #include "pzo.h"
+#include "cm.h"
 #include "cptn.h"
+#include "runtime_error.h"
 #include <algorithm>
 #include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <limits>
+#include <string_view>
 
 static bool s_fInfiniteTimer = false;
 static float s_svtTimerBeforeCheat = -1.0f;
@@ -558,6 +567,18 @@ void RenderMenuGui(SW* psw)
             if (ImGui::IsItemHovered())
                 g_fDisableInput = true;
 
+			bool traceMusicDropout = FMusicDropoutTraceEnabled();
+			if (ImGui::MenuItem("Trace Random Music Dropout", nullptr,
+				&traceMusicDropout))
+			{
+				SetMusicDropoutTraceEnabled(traceMusicDropout);
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("Writes MusicDiagnostics/music_dropout_trace.log beside the executable");
+				g_fDisableInput = true;
+			}
+
             ImGui::Separator();
             if (ImGui::BeginMenu("Audition Loaded SFX"))
             {
@@ -628,20 +649,33 @@ void RenderMenuGui(SW* psw)
         {
             if (ImGui::IsItemHovered()) g_fDisableInput = true;
 
+            bool traceCameraBlackScreen = FCameraBlackScreenTraceEnabled();
+            if (ImGui::MenuItem("Trace Camera Black Screen Bug", nullptr,
+                &traceCameraBlackScreen))
+            {
+                SetCameraBlackScreenTraceEnabled(traceCameraBlackScreen);
+            }
+
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Writes CameraDiagnostics/camera_black_screen_trace.log beside the executable");
+                g_fDisableInput = true;
+            }
+
+            ImGui::Separator();
+
             if (psw != nullptr)
             {
                 if (ImGui::MenuItem("Export Map"))
                 {
                     std::cout << "Exporting Map..." << "\n";
-                    ExportSw();
-                    std::cout << "Export Complete" << "\n";
+                    std::cout << (ExportSw() ? "Export Complete\n" : "Export Failed\n");
                 }
 
                 if (ImGui::MenuItem("Export Map (Bake Lights)"))
                 {
                     std::cout << "Exporting Map..." << "\n";
-                    ExportSwLightsBaked();
-                    std::cout << "Export Complete" << "\n";
+                    std::cout << (ExportSwLightsBaked() ? "Export Complete\n" : "Export Failed\n");
                 }
 
                 if (ImGui::MenuItem("Export Textures"))
@@ -1222,6 +1256,17 @@ void RenderMenuGui(SW* psw)
                 ? selectedFileName
                 : selectedFileName.substr(0, extensionPosition);
 
+            // Rebuilt test files live beside the retail BRX. Use the base
+            // level name for g_levelTable lookup while preserving `file` as
+            // the exact path selected by the user.
+            constexpr std::string_view rebuiltSuffix = "_Rebuilt";
+            if (levelName.size() >= rebuiltSuffix.size() &&
+                levelName.compare(levelName.size() - rebuiltSuffix.size(),
+                    rebuiltSuffix.size(), rebuiltSuffix) == 0)
+            {
+                levelName.erase(levelName.size() - rebuiltSuffix.size());
+            }
+
             LEVELINFO* plevel = PlevelinfoFromLevelName(levelName);
 
             if (plevel != nullptr)
@@ -1282,6 +1327,179 @@ void PngWriteCallback(void* context, void* data, int size)
     png->data.insert(png->data.end(), bytes, bytes + size);
 }
 
+// Return a validated RGBA8 base level for tools which need CPU pixels. Rebuilt
+// BRX files may store BC1/BC3 payloads, and release builds discard their CPU
+// copies after upload, so diffuseTexture cannot be passed directly to stb.
+static bool GetBmpBaseRgba8(const BMP* bmp, std::vector<byte>& readback, const byte*& pixels)
+{
+    pixels = nullptr;
+    if (bmp == nullptr || bmp->bmpWidth == 0 || bmp->bmpHeight == 0)
+        return false;
+
+    const uint64_t byteCount64 =
+        static_cast<uint64_t>(bmp->bmpWidth) * static_cast<uint64_t>(bmp->bmpHeight) * 4u;
+    if (byteCount64 > static_cast<uint64_t>((std::numeric_limits<size_t>::max)()) ||
+        bmp->bmpWidth > static_cast<uint32_t>((std::numeric_limits<int>::max)() / 4))
+        return false;
+
+    const size_t byteCount = static_cast<size_t>(byteCount64);
+    if (bmp->textureFormat == 0 && bmp->diffuseTexture.size() >= byteCount)
+    {
+        pixels = bmp->diffuseTexture.data();
+        return true;
+    }
+
+    if (bmp->glDiffuseMap == 0)
+        return false;
+
+    readback.resize(byteCount);
+    GLint previousTexture = 0;
+    GLint previousPackAlignment = 4;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &previousPackAlignment);
+    glBindTexture(GL_TEXTURE_2D, bmp->glDiffuseMap);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, readback.data());
+    glPixelStorei(GL_PACK_ALIGNMENT, previousPackAlignment);
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture));
+
+    pixels = readback.data();
+    return true;
+}
+
+struct ExportRgbaImage
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<byte> pixels;
+};
+
+struct BakedTextureSet
+{
+    ExportRgbaImage ambient;
+    ExportRgbaImage diffuse;
+    ExportRgbaImage saturate;
+    bool hasAmbient = false;
+    bool hasDiffuse = false;
+    bool hasSaturate = false;
+};
+
+static BMP* BmpFromImageIndex(int32_t imageIndex)
+{
+    return imageIndex >= 0 && static_cast<size_t>(imageIndex) < g_abmp.size()
+        ? &g_abmp[static_cast<size_t>(imageIndex)] : nullptr;
+}
+
+static bool LoadExportRgbaImage(BMP* bmp, ExportRgbaImage& image)
+{
+    image = {};
+    std::vector<byte> readback;
+    const byte* pixels = nullptr;
+    if (!GetBmpBaseRgba8(bmp, readback, pixels))
+        return false;
+
+    const size_t byteCount = static_cast<size_t>(bmp->bmpWidth) * bmp->bmpHeight * 4u;
+    image.width = bmp->bmpWidth;
+    image.height = bmp->bmpHeight;
+    image.pixels.assign(pixels, pixels + byteCount);
+    return true;
+}
+
+static int ExportTextureFrame(const SUBGLOB& sub, const SHD& shd)
+{
+    if (shd.atex.empty() || shd.atex[0].abmp.empty())
+        return 0;
+
+    int frame = sub.uvSai != nullptr ? sub.uvSai->iframe : 0;
+    return std::clamp(frame, 0, static_cast<int>(shd.atex[0].abmp.size()) - 1);
+}
+
+static uint64_t ExportMaterialKey(int shdID, int frame)
+{
+    return (static_cast<uint64_t>(static_cast<uint32_t>(shdID)) << 32) |
+        static_cast<uint32_t>(frame);
+}
+
+static BakedTextureSet LoadBakedTextureSet(const SHD& shd, int frame)
+{
+    BakedTextureSet result{};
+    if (shd.atex.empty())
+        return result;
+
+    const TEX& tex = shd.atex[0];
+    if (tex.ambientImageIndex.empty() || tex.diffuseImageIndex.empty() ||
+        tex.saturateImageIndex.empty())
+        return result;
+
+    const size_t availableFrames = std::min({tex.ambientImageIndex.size(),
+        tex.diffuseImageIndex.size(), tex.saturateImageIndex.size()});
+    if (availableFrames == 0)
+        return result;
+    const size_t frameIndex = std::min(static_cast<size_t>(std::max(frame, 0)),
+        availableFrames - 1);
+
+    BMP* ambient = BmpFromImageIndex(tex.ambientImageIndex[frameIndex]);
+    BMP* diffuse = BmpFromImageIndex(tex.diffuseImageIndex[frameIndex]);
+    BMP* saturate = BmpFromImageIndex(tex.saturateImageIndex[frameIndex]);
+    result.hasAmbient = LoadExportRgbaImage(ambient, result.ambient);
+    result.hasDiffuse = LoadExportRgbaImage(diffuse != nullptr ? diffuse : ambient,
+        result.diffuse);
+    result.hasSaturate = LoadExportRgbaImage(saturate, result.saturate);
+    return result;
+}
+
+static bool FValidExportIndices(const SUBGLOB& sub)
+{
+    const size_t vertexCount = sub.vertices.size();
+    return std::all_of(sub.indices.begin(), sub.indices.end(),
+        [vertexCount](const INDICE& tri)
+        {
+            return static_cast<size_t>(tri.v1) < vertexCount &&
+                static_cast<size_t>(tri.v2) < vertexCount &&
+                static_cast<size_t>(tri.v3) < vertexCount;
+        });
+}
+
+static bool FValidExportVertices(const SUBGLOB& sub)
+{
+    return std::all_of(sub.vertices.begin(), sub.vertices.end(),
+        [](const VERTICE& vertex)
+        {
+            const auto finite3 = [](const glm::vec3& value)
+            {
+                return std::isfinite(value.x) && std::isfinite(value.y) &&
+                    std::isfinite(value.z);
+            };
+            const auto finite4 = [](const glm::vec4& value)
+            {
+                return std::isfinite(value.x) && std::isfinite(value.y) &&
+                    std::isfinite(value.z) && std::isfinite(value.w);
+            };
+            return finite3(vertex.pos) && finite3(vertex.normal) &&
+                finite4(vertex.color) && finite4(vertex.boneWeights) &&
+                std::isfinite(vertex.uv.x) && std::isfinite(vertex.uv.y);
+        });
+}
+
+static bool FFiniteExportMatrix(const glm::mat4& matrix)
+{
+    const float* values = glm::value_ptr(matrix);
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite(values[i]))
+            return false;
+    return true;
+}
+
+static glm::vec3 TransformExportNormal(const glm::mat3& normalMatrix,
+                                       const glm::vec3& normal)
+{
+    const glm::vec3 transformed = normalMatrix * normal;
+    const float lengthSquared = glm::dot(transformed, transformed);
+    return lengthSquared > 1.0e-12f
+        ? transformed * glm::inversesqrt(lengthSquared)
+        : glm::vec3(0.0f, 1.0f, 0.0f);
+}
+
 glm::quat RotationBetweenVectors(const glm::vec3& from, const glm::vec3& to)
 {
     glm::vec3 f = glm::normalize(from);
@@ -1314,9 +1532,660 @@ glm::quat RotationBetweenVectors(const glm::vec3& from, const glm::vec3& to)
     return glm::normalize(q);
 }
 
-void ExportSw()
+static json ExportMatrix(const glm::mat4& matrix)
 {
-    std::filesystem::create_directory(levelName);
+    json result = json::array();
+    const float* values = glm::value_ptr(matrix);
+    for (int i = 0; i < 16; ++i)
+        result.push_back(values[i]);
+    return result;
+}
+
+static bool SetExportNodeTrs(json& node, const glm::mat4& matrix)
+{
+    if (!FFiniteExportMatrix(matrix))
+        return false;
+
+    const glm::vec3 translation(matrix[3]);
+    glm::vec3 scale(glm::length(glm::vec3(matrix[0])),
+        glm::length(glm::vec3(matrix[1])), glm::length(glm::vec3(matrix[2])));
+    if (scale.x <= 1.0e-8f || scale.y <= 1.0e-8f || scale.z <= 1.0e-8f)
+        return false;
+
+    glm::mat3 rotation;
+    rotation[0] = glm::vec3(matrix[0]) / scale.x;
+    rotation[1] = glm::vec3(matrix[1]) / scale.y;
+    rotation[2] = glm::vec3(matrix[2]) / scale.z;
+    if (glm::determinant(rotation) < 0.0f)
+    {
+        scale.x = -scale.x;
+        rotation[0] = -rotation[0];
+    }
+
+    const glm::quat quaternion = glm::normalize(glm::quat_cast(rotation));
+    if (!std::isfinite(quaternion.x) || !std::isfinite(quaternion.y) ||
+        !std::isfinite(quaternion.z) || !std::isfinite(quaternion.w))
+        return false;
+
+    node["translation"] = {translation.x, translation.y, translation.z};
+    node["rotation"] = {quaternion.x, quaternion.y, quaternion.z, quaternion.w};
+    node["scale"] = {scale.x, scale.y, scale.z};
+    return true;
+}
+
+static glm::mat4 OriginalAloWorldMatrix(const ALO* alo)
+{
+    if (alo == nullptr)
+        return glm::mat4(1.0f);
+
+    glm::mat4 local(alo->matOrig);
+    local[3] = glm::vec4(alo->posOrig, 1.0f);
+    return OriginalAloWorldMatrix(alo->paloParent) * local;
+}
+
+static json BuildCelBorderPrimitive(const GLOB& glob, const glm::mat4& transform,
+    bool skinned, int boneCount, int materialIndex,
+    std::vector<uint8_t>& binaryBuffer, std::vector<json>& bufferViews,
+    std::vector<json>& accessors)
+{
+    if (glob.edgeCount <= 0 ||
+        glob.edgePoints.size() < static_cast<size_t>(glob.edgeCount) * 4 ||
+        !FFiniteExportMatrix(transform))
+        return json();
+
+    std::vector<CELPOINT> endpoints;
+    endpoints.reserve(static_cast<size_t>(glob.edgeCount) * 2);
+    for (int edge = 0; edge < glob.edgeCount; ++edge)
+    {
+        endpoints.push_back(glob.edgePoints[static_cast<size_t>(edge) * 4]);
+        endpoints.push_back(glob.edgePoints[static_cast<size_t>(edge) * 4 + 1]);
+    }
+
+    glm::vec3 positionMin((std::numeric_limits<float>::max)());
+    glm::vec3 positionMax((std::numeric_limits<float>::lowest)());
+    AlignTo4(binaryBuffer);
+    const size_t positionOffset = binaryBuffer.size();
+    for (const CELPOINT& point : endpoints)
+    {
+        const glm::vec3 position = glm::vec3(transform * glm::vec4(glm::vec3(point.position), 1.0f));
+        if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
+            !std::isfinite(position.z))
+            return json();
+        positionMin = glm::min(positionMin, position);
+        positionMax = glm::max(positionMax, position);
+        AppendFloat(binaryBuffer, position.x);
+        AppendFloat(binaryBuffer, position.y);
+        AppendFloat(binaryBuffer, position.z);
+    }
+    const int positionView = static_cast<int>(bufferViews.size());
+    bufferViews.push_back({{"buffer", 0}, {"byteOffset", positionOffset},
+        {"byteLength", binaryBuffer.size() - positionOffset}, {"target", 34962}});
+    const int positionAccessor = static_cast<int>(accessors.size());
+    accessors.push_back({{"bufferView", positionView}, {"componentType", 5126},
+        {"count", endpoints.size()}, {"type", "VEC3"},
+        {"min", {positionMin.x, positionMin.y, positionMin.z}},
+        {"max", {positionMax.x, positionMax.y, positionMax.z}}});
+
+    json attributes = {{"POSITION", positionAccessor}};
+    if (skinned)
+    {
+        AlignTo4(binaryBuffer);
+        const size_t jointOffset = binaryBuffer.size();
+        for (const CELPOINT& point : endpoints)
+            for (int influence = 0; influence < 4; ++influence)
+            {
+                const uint16_t joint = point.boneIndices[influence] <
+                    static_cast<uint32_t>(boneCount)
+                    ? static_cast<uint16_t>(point.boneIndices[influence]) : 0;
+                binaryBuffer.push_back(static_cast<uint8_t>(joint & 0xff));
+                binaryBuffer.push_back(static_cast<uint8_t>(joint >> 8));
+            }
+        const int jointView = static_cast<int>(bufferViews.size());
+        bufferViews.push_back({{"buffer", 0}, {"byteOffset", jointOffset},
+            {"byteLength", binaryBuffer.size() - jointOffset}, {"target", 34962}});
+        const int jointAccessor = static_cast<int>(accessors.size());
+        accessors.push_back({{"bufferView", jointView}, {"componentType", 5123},
+            {"count", endpoints.size()}, {"type", "VEC4"}});
+
+        AlignTo4(binaryBuffer);
+        const size_t weightOffset = binaryBuffer.size();
+        for (const CELPOINT& point : endpoints)
+        {
+            glm::vec4 weights = point.boneWeights;
+            const float total = weights.x + weights.y + weights.z + weights.w;
+            if (total > 0.000001f)
+                weights /= total;
+            for (int influence = 0; influence < 4; ++influence)
+                AppendFloat(binaryBuffer, weights[influence]);
+        }
+        const int weightView = static_cast<int>(bufferViews.size());
+        bufferViews.push_back({{"buffer", 0}, {"byteOffset", weightOffset},
+            {"byteLength", binaryBuffer.size() - weightOffset}, {"target", 34962}});
+        const int weightAccessor = static_cast<int>(accessors.size());
+        accessors.push_back({{"bufferView", weightView}, {"componentType", 5126},
+            {"count", endpoints.size()}, {"type", "VEC4"}});
+        attributes["JOINTS_0"] = jointAccessor;
+        attributes["WEIGHTS_0"] = weightAccessor;
+    }
+
+    return {{"attributes", attributes}, {"material", materialIndex}, {"mode", 1}};
+}
+
+static int AppendStaticCelBorders(std::vector<uint8_t>& binaryBuffer,
+    std::vector<json>& bufferViews, std::vector<json>& accessors,
+    std::vector<json>& meshes, std::vector<json>& nodes,
+    std::vector<int>& sceneNodes, int materialIndex)
+{
+    const glm::mat4 zUpToYUp = glm::rotate(glm::mat4(1.0f),
+        glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    int count = 0;
+    for (size_t aloIndex = 0; aloIndex < allSWAloObjs.size(); ++aloIndex)
+    {
+        ALO* alo = allSWAloObjs[aloIndex];
+        if (alo == nullptr || alo->globset.cbnd > 0)
+            continue;
+        for (size_t globIndex = 0; globIndex < alo->globset.aglob.size(); ++globIndex)
+        {
+            const GLOB& glob = alo->globset.aglob[globIndex];
+            glm::mat4 model = alo->xf.matWorld;
+            model[3] = glm::vec4(alo->xf.posWorld, 1.0f);
+            if (glob.pdmat != nullptr)
+                model *= *glob.pdmat;
+            json primitive = BuildCelBorderPrimitive(glob, zUpToYUp * model, false,
+                0, materialIndex, binaryBuffer, bufferViews, accessors);
+            if (primitive.is_null())
+                continue;
+            const int mesh = static_cast<int>(meshes.size());
+            meshes.push_back({{"name", "CelBorder_" + std::to_string(aloIndex) + "_" +
+                std::to_string(globIndex)}, {"primitives", json::array({primitive})}});
+            const int node = static_cast<int>(nodes.size());
+            nodes.push_back({{"name", "CelBorder_" + std::to_string(aloIndex) + "_" +
+                std::to_string(globIndex)}, {"mesh", mesh}});
+            sceneNodes.push_back(node);
+            ++count;
+        }
+    }
+    return count;
+}
+
+static bool EnsureExportLevelName()
+{
+    if (!levelName.empty())
+        return true;
+
+    if (g_pgsCur != nullptr)
+    {
+        const int levelId = (static_cast<int>(g_pgsCur->gameWorldCur) << 8) |
+            static_cast<int>(g_pgsCur->worldLevelCur);
+        const LEVELINFO* levelInfo = GetLevelInfo(levelId);
+        if (levelInfo != nullptr && !levelInfo->levelName.empty())
+            levelName = std::filesystem::path(levelInfo->levelName).stem().string();
+
+        if (levelName.empty())
+            levelName = "World_" + std::to_string(static_cast<int>(g_pgsCur->gameWorldCur)) +
+                "_" + std::to_string(static_cast<int>(g_pgsCur->worldLevelCur));
+    }
+
+    if (levelName.empty() && g_psw != nullptr && g_psw->pchzName != nullptr &&
+        g_psw->pchzName[0] != '\0')
+        levelName = std::filesystem::path(g_psw->pchzName).stem().string();
+
+    if (levelName.empty())
+    {
+        ReportRuntimeError("Export", "Could not determine a name for the loaded world");
+        return false;
+    }
+    return true;
+}
+
+static int AppendSkeletalMeshes(std::vector<uint8_t>& binaryBuffer,
+    std::vector<json>& bufferViews, std::vector<json>& accessors,
+    std::vector<json>& meshes, std::vector<json>& nodes,
+    std::vector<json>& skins, std::vector<json>& animations,
+    std::vector<int>& sceneNodes,
+    const std::unordered_map<uint64_t, int>& materialIndices, int celBorderMaterialIndex)
+{
+    if (g_psw == nullptr)
+        return 0;
+
+        const glm::mat4 zUpToYUp = glm::rotate(glm::mat4(1.0f),
+            glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        const int basisNode = static_cast<int>(nodes.size());
+        nodes.push_back({{"name", "ProjectCane_Z_Up"}, {"matrix", ExportMatrix(zUpToYUp)},
+            {"children", json::array()}});
+        sceneNodes.push_back(basisNode);
+
+        int exportedModels = 0;
+        for (size_t aloIndex = 0; aloIndex < allSWAloObjs.size(); ++aloIndex)
+        {
+            ALO* alo = allSWAloObjs[aloIndex];
+            GLOBSET& globset = alo->globset;
+            if (globset.cbnd <= 0 || globset.abnd.size() < static_cast<size_t>(globset.cbnd))
+                continue;
+
+            bool hasSkinnedGeometry = false;
+            for (const GLOB& glob : globset.aglob)
+                for (const SUBGLOB& sub : glob.asubglob)
+                    hasSkinnedGeometry |= sub.cibnd > 0 && !sub.vertices.empty() && !sub.indices.empty();
+            if (!hasSkinnedGeometry)
+                continue;
+
+            const glm::mat4 meshBind = OriginalAloWorldMatrix(alo);
+            if (!FFiniteExportMatrix(meshBind))
+            {
+                ReportRuntimeError("Export",
+                    "Skipping skeletal model %zu because its bind transform is non-finite",
+                    aloIndex);
+                continue;
+            }
+
+            std::vector<glm::mat4> jointWorld(globset.cbnd, glm::mat4(1.0f));
+            std::unordered_map<ALO*, int> boneLookup;
+            for (int bone = 0; bone < globset.cbnd; ++bone)
+            {
+                const BND& binding = globset.abnd[bone];
+                jointWorld[bone] = meshBind * glm::inverse(binding.dmatOrig);
+                if (!FFiniteExportMatrix(binding.dmatOrig) ||
+                    !FFiniteExportMatrix(jointWorld[bone]))
+                {
+                    boneLookup.clear();
+                    break;
+                }
+                if (binding.palo != nullptr)
+                    boneLookup[binding.palo] = bone;
+            }
+            if (boneLookup.empty())
+            {
+                ReportRuntimeError("Export",
+                    "Skipping skeletal model %zu because its bind matrices are non-finite",
+                    aloIndex);
+                continue;
+            }
+
+            std::vector<int> jointNodes(globset.cbnd, -1);
+            for (int bone = 0; bone < globset.cbnd; ++bone)
+            {
+                ALO* boneAlo = globset.abnd[bone].palo;
+                glm::mat4 local = jointWorld[bone];
+                if (boneAlo != nullptr && boneAlo->paloParent != nullptr)
+                {
+                    auto parent = boneLookup.find(boneAlo->paloParent);
+                    if (parent != boneLookup.end())
+                        local = glm::inverse(jointWorld[parent->second]) * jointWorld[bone];
+                }
+
+                const std::string boneName = boneAlo != nullptr && boneAlo->pchzName != nullptr
+                    ? boneAlo->pchzName : "Bone_" + std::to_string(bone);
+                jointNodes[bone] = static_cast<int>(nodes.size());
+                json jointNode = {{"name", boneName}, {"children", json::array()}};
+                if (!SetExportNodeTrs(jointNode, local))
+                {
+                    ReportRuntimeError("Export",
+                        "Skipping skeletal model %zu because joint %d cannot be decomposed",
+                        aloIndex, bone);
+                    jointNodes.clear();
+                    break;
+                }
+                nodes.push_back(std::move(jointNode));
+            }
+            if (jointNodes.empty())
+                continue;
+
+            const int rigRootNode = static_cast<int>(nodes.size());
+            nodes.push_back({{"name", "Rig_" + std::to_string(aloIndex)},
+                {"children", json::array()}});
+            nodes[basisNode]["children"].push_back(rigRootNode);
+
+            for (int bone = 0; bone < globset.cbnd; ++bone)
+            {
+                ALO* boneAlo = globset.abnd[bone].palo;
+                auto parent = boneAlo != nullptr ? boneLookup.find(boneAlo->paloParent) : boneLookup.end();
+                if (parent != boneLookup.end())
+                    nodes[jointNodes[parent->second]]["children"].push_back(jointNodes[bone]);
+                else
+                    nodes[rigRootNode]["children"].push_back(jointNodes[bone]);
+            }
+
+            AlignTo4(binaryBuffer);
+            const size_t inverseBindOffset = binaryBuffer.size();
+            for (int bone = 0; bone < globset.cbnd; ++bone)
+            {
+                const BND& binding = globset.abnd[bone];
+                const float* matrix = glm::value_ptr(binding.dmatOrig);
+                for (int component = 0; component < 16; ++component)
+                    AppendFloat(binaryBuffer, matrix[component]);
+            }
+            const int inverseBindView = static_cast<int>(bufferViews.size());
+            bufferViews.push_back({{"buffer", 0}, {"byteOffset", inverseBindOffset},
+                {"byteLength", globset.cbnd * sizeof(glm::mat4)}});
+            const int inverseBindAccessor = static_cast<int>(accessors.size());
+            accessors.push_back({{"bufferView", inverseBindView}, {"componentType", 5126},
+                {"count", globset.cbnd}, {"type", "MAT4"}});
+
+            json primitives = json::array();
+            for (const GLOB& glob : globset.aglob)
+            {
+                for (const SUBGLOB& sub : glob.asubglob)
+                {
+                    if (sub.cibnd <= 0 || sub.vertices.empty() || sub.indices.empty() ||
+                        !FValidExportIndices(sub) || !FValidExportVertices(sub))
+                        continue;
+
+                    bool validSkin = true;
+                    for (const VERTICE& vertex : sub.vertices)
+                        for (int influence = 0; influence < 4; ++influence)
+                            if (vertex.boneWeights[influence] != 0.0f &&
+                                vertex.boneIndices[influence] >= static_cast<uint32_t>(globset.cbnd))
+                                validSkin = false;
+                    if (!validSkin)
+                    {
+                        ReportRuntimeError("Export",
+                            "Skipping skeletal submesh because a weighted bone index is out of range");
+                        continue;
+                    }
+
+                    auto AddFloatAttribute = [&](const char* type,
+                        auto writeVertex) -> int
+                    {
+                        AlignTo4(binaryBuffer);
+                        const size_t offset = binaryBuffer.size();
+                        for (const VERTICE& vertex : sub.vertices)
+                            writeVertex(vertex);
+                        const int view = static_cast<int>(bufferViews.size());
+                        bufferViews.push_back({{"buffer", 0}, {"byteOffset", offset},
+                            {"byteLength", binaryBuffer.size() - offset}, {"target", 34962}});
+                        const int accessor = static_cast<int>(accessors.size());
+                        accessors.push_back({{"bufferView", view}, {"componentType", 5126},
+                            {"count", sub.vertices.size()}, {"type", type}});
+                        return accessor;
+                    };
+
+                    glm::vec3 minPosition((std::numeric_limits<float>::max)());
+                    glm::vec3 maxPosition((std::numeric_limits<float>::lowest)());
+                    const int positionAccessor = AddFloatAttribute("VEC3", [&](const VERTICE& v)
+                    {
+                        minPosition = glm::min(minPosition, v.pos);
+                        maxPosition = glm::max(maxPosition, v.pos);
+                        AppendFloat(binaryBuffer, v.pos.x); AppendFloat(binaryBuffer, v.pos.y);
+                        AppendFloat(binaryBuffer, v.pos.z);
+                    });
+                    accessors[positionAccessor]["min"] = {minPosition.x, minPosition.y, minPosition.z};
+                    accessors[positionAccessor]["max"] = {maxPosition.x, maxPosition.y, maxPosition.z};
+
+                    const int normalAccessor = AddFloatAttribute("VEC3", [&](const VERTICE& v)
+                    {
+                        AppendFloat(binaryBuffer, v.normal.x); AppendFloat(binaryBuffer, v.normal.y);
+                        AppendFloat(binaryBuffer, v.normal.z);
+                    });
+                    const int uvAccessor = AddFloatAttribute("VEC2", [&](const VERTICE& v)
+                    {
+                        AppendFloat(binaryBuffer, v.uv.x); AppendFloat(binaryBuffer, v.uv.y);
+                    });
+                    const int weightAccessor = AddFloatAttribute("VEC4", [&](const VERTICE& v)
+                    {
+                        glm::vec4 weights = v.boneWeights;
+                        const float total = weights.x + weights.y + weights.z + weights.w;
+                        if (total > 0.000001f)
+                            weights /= total;
+                        AppendFloat(binaryBuffer, weights.x); AppendFloat(binaryBuffer, weights.y);
+                        AppendFloat(binaryBuffer, weights.z); AppendFloat(binaryBuffer, weights.w);
+                    });
+
+                    AlignTo4(binaryBuffer);
+                    const size_t jointOffset = binaryBuffer.size();
+                    for (const VERTICE& vertex : sub.vertices)
+                        for (int influence = 0; influence < 4; ++influence)
+                        {
+                            const uint16_t joint = vertex.boneIndices[influence] <
+                                static_cast<uint32_t>(globset.cbnd)
+                                ? static_cast<uint16_t>(vertex.boneIndices[influence]) : 0;
+                            binaryBuffer.push_back(static_cast<uint8_t>(joint & 0xff));
+                            binaryBuffer.push_back(static_cast<uint8_t>(joint >> 8));
+                        }
+                    const int jointView = static_cast<int>(bufferViews.size());
+                    bufferViews.push_back({{"buffer", 0}, {"byteOffset", jointOffset},
+                        {"byteLength", binaryBuffer.size() - jointOffset}, {"target", 34962}});
+                    const int jointAccessor = static_cast<int>(accessors.size());
+                    accessors.push_back({{"bufferView", jointView}, {"componentType", 5123},
+                        {"count", sub.vertices.size()}, {"type", "VEC4"}});
+
+                    AlignTo4(binaryBuffer);
+                    const size_t indexOffset = binaryBuffer.size();
+                    for (const INDICE& triangle : sub.indices)
+                    {
+                        AppendUInt32(binaryBuffer, triangle.v1);
+                        AppendUInt32(binaryBuffer, triangle.v2);
+                        AppendUInt32(binaryBuffer, triangle.v3);
+                    }
+                    const int indexView = static_cast<int>(bufferViews.size());
+                    bufferViews.push_back({{"buffer", 0}, {"byteOffset", indexOffset},
+                        {"byteLength", binaryBuffer.size() - indexOffset}, {"target", 34963}});
+                    const int indexAccessor = static_cast<int>(accessors.size());
+                    accessors.push_back({{"bufferView", indexView}, {"componentType", 5125},
+                        {"count", sub.indices.size() * 3}, {"type", "SCALAR"}});
+
+                    int materialIndex = 0;
+                    if (sub.shdID >= 0 && sub.shdID < static_cast<int>(g_ashd.size()))
+                    {
+                        SHD& shd = g_ashd[sub.shdID];
+                        const uint64_t materialKey = ExportMaterialKey(
+                            sub.shdID, ExportTextureFrame(sub, shd));
+                        const auto material = materialIndices.find(materialKey);
+                        if (material != materialIndices.end())
+                            materialIndex = material->second;
+                    }
+
+                    primitives.push_back({{"attributes", {{"POSITION", positionAccessor},
+                        {"NORMAL", normalAccessor}, {"TEXCOORD_0", uvAccessor},
+                        {"JOINTS_0", jointAccessor}, {"WEIGHTS_0", weightAccessor}}},
+                        {"indices", indexAccessor}, {"material", materialIndex}, {"mode", 4}});
+                }
+            }
+
+            for (const GLOB& glob : globset.aglob)
+            {
+                json celPrimitive = BuildCelBorderPrimitive(glob, glm::mat4(1.0f), true,
+                    globset.cbnd, celBorderMaterialIndex, binaryBuffer, bufferViews, accessors);
+                if (!celPrimitive.is_null())
+                    primitives.push_back(std::move(celPrimitive));
+            }
+
+            if (primitives.empty())
+                continue;
+
+            const int skinIndex = static_cast<int>(skins.size());
+            skins.push_back({{"name", "Skin_" + std::to_string(aloIndex)},
+                {"joints", jointNodes}, {"skeleton", rigRootNode},
+                {"inverseBindMatrices", inverseBindAccessor}});
+            const int meshIndex = static_cast<int>(meshes.size());
+            meshes.push_back({{"name", alo->pchzName != nullptr ? alo->pchzName :
+                "SkeletalMesh_" + std::to_string(aloIndex)}, {"primitives", primitives}});
+
+            const int meshNode = static_cast<int>(nodes.size());
+            nodes.push_back({{"name", "Skinned_" + std::to_string(aloIndex)},
+                {"mesh", meshIndex}, {"skin", skinIndex}, {"matrix", ExportMatrix(meshBind)}});
+            nodes[rigRootNode]["children"].push_back(meshNode);
+
+            struct AnimatedBoneTarget
+            {
+                ALO* alo = nullptr;
+                int node = -1;
+            };
+            std::unordered_map<int, AnimatedBoneTarget> animatedBones;
+            for (int bone = 0; bone < globset.cbnd; ++bone)
+            {
+                ALO* boneAlo = globset.abnd[bone].palo;
+                if (boneAlo != nullptr)
+                    animatedBones[static_cast<int>(boneAlo->oid)] =
+                        AnimatedBoneTarget{boneAlo, jointNodes[bone]};
+            }
+
+            for (const std::shared_ptr<LO>& object : allWorldObjs)
+            {
+                if (!object || object->pvtlo == nullptr || object->pvtlo->cid != CID_ASEG)
+                    continue;
+
+                ASEG* aseg = static_cast<ASEG*>(object.get());
+                if (!(aseg->tMax > 0.0f) || !std::isfinite(aseg->tMax))
+                    continue;
+
+                bool hasMatchingChannel = false;
+                for (const CHN& channel : aseg->achn)
+                    if (animatedBones.find(static_cast<int>(channel.oid)) != animatedBones.end() &&
+                        (channel.pacp || channel.pacr || channel.pacs))
+                        hasMatchingChannel = true;
+                if (!hasMatchingChannel)
+                    continue;
+
+                const int frameCount = std::max(2,
+                    static_cast<int>(std::ceil(aseg->tMax * 60.0f)) + 1);
+                std::vector<float> times(frameCount);
+                for (int frame = 0; frame < frameCount; ++frame)
+                    times[frame] = std::min(frame / 60.0f, aseg->tMax);
+
+                AlignTo4(binaryBuffer);
+                const size_t timeOffset = binaryBuffer.size();
+                for (float time : times)
+                    AppendFloat(binaryBuffer, time);
+                const int timeView = static_cast<int>(bufferViews.size());
+                bufferViews.push_back({{"buffer", 0}, {"byteOffset", timeOffset},
+                    {"byteLength", binaryBuffer.size() - timeOffset}});
+                const int timeAccessor = static_cast<int>(accessors.size());
+                accessors.push_back({{"bufferView", timeView}, {"componentType", 5126},
+                    {"count", times.size()}, {"type", "SCALAR"},
+                    {"min", {0.0f}}, {"max", {aseg->tMax}}});
+
+                json samplers = json::array();
+                json channels = json::array();
+                auto AddAnimationOutput = [&](const char* path, int node,
+                    int components, const char* type, const std::vector<float>& values)
+                {
+                    AlignTo4(binaryBuffer);
+                    const size_t valueOffset = binaryBuffer.size();
+                    for (float value : values)
+                        AppendFloat(binaryBuffer, value);
+                    const int valueView = static_cast<int>(bufferViews.size());
+                    bufferViews.push_back({{"buffer", 0}, {"byteOffset", valueOffset},
+                        {"byteLength", binaryBuffer.size() - valueOffset}});
+                    const int valueAccessor = static_cast<int>(accessors.size());
+                    accessors.push_back({{"bufferView", valueView}, {"componentType", 5126},
+                        {"count", values.size() / components}, {"type", type}});
+                    const int sampler = static_cast<int>(samplers.size());
+                    samplers.push_back({{"input", timeAccessor}, {"output", valueAccessor},
+                        {"interpolation", "LINEAR"}});
+                    channels.push_back({{"sampler", sampler},
+                        {"target", {{"node", node}, {"path", path}}}});
+                };
+
+                for (const CHN& channel : aseg->achn)
+                {
+                    const auto target = animatedBones.find(static_cast<int>(channel.oid));
+                    if (target == animatedBones.end())
+                        continue;
+                    ALO* targetAlo = target->second.alo;
+                    const int targetNode = target->second.node;
+
+                    if (channel.pacp && channel.pacp->pvtacp != nullptr &&
+                        channel.pacp->pvtacp->pfnEvaluateAcp != nullptr)
+                    {
+                        std::vector<float> values;
+                        values.reserve(times.size() * 3);
+                        bool valid = true;
+                        for (float time : times)
+                        {
+                            glm::vec3 position(0.0f);
+                            channel.pacp->pvtacp->pfnEvaluateAcp(channel.pacp.get(),
+                                targetAlo, time, 1.0f, static_cast<GRFEVAL>(0), &position, nullptr);
+                            valid &= std::isfinite(position.x) && std::isfinite(position.y) &&
+                                std::isfinite(position.z);
+                            values.insert(values.end(), {position.x, position.y, position.z});
+                        }
+                        if (valid)
+                            AddAnimationOutput("translation", targetNode, 3, "VEC3", values);
+                    }
+
+                    if (channel.pacr && channel.pacr->pvtacr != nullptr &&
+                        channel.pacr->pvtacr->pfnEvaluateAcr != nullptr)
+                    {
+                        std::vector<float> values;
+                        values.reserve(times.size() * 4);
+                        bool valid = true;
+                        glm::quat previous(1.0f, 0.0f, 0.0f, 0.0f);
+                        for (size_t frame = 0; frame < times.size(); ++frame)
+                        {
+                            glm::mat3 rotation(1.0f);
+                            channel.pacr->pvtacr->pfnEvaluateAcr(channel.pacr.get(),
+                                targetAlo, times[frame], 1.0f, static_cast<GRFEVAL>(0),
+                                &rotation, nullptr);
+                            glm::quat value = glm::normalize(glm::quat_cast(rotation));
+                            if (frame != 0 && glm::dot(previous, value) < 0.0f)
+                                value = -value;
+                            previous = value;
+                            valid &= std::isfinite(value.x) && std::isfinite(value.y) &&
+                                std::isfinite(value.z) && std::isfinite(value.w);
+                            values.insert(values.end(), {value.x, value.y, value.z, value.w});
+                        }
+                        if (valid)
+                            AddAnimationOutput("rotation", targetNode, 4, "VEC4", values);
+                    }
+
+                    if (channel.pacs && channel.pacs->pvtacs != nullptr &&
+                        channel.pacs->pvtacs->pfnEvaluateAcs != nullptr)
+                    {
+                        std::vector<float> values;
+                        values.reserve(times.size() * 3);
+                        bool valid = true;
+                        for (float time : times)
+                        {
+                            glm::mat3 scaleMatrix(1.0f);
+                            channel.pacs->pvtacs->pfnEvaluateAcs(channel.pacs.get(),
+                                targetAlo, time, static_cast<GRFEVAL>(0), &scaleMatrix);
+                            const glm::vec3 scale(scaleMatrix[0][0], scaleMatrix[1][1],
+                                scaleMatrix[2][2]);
+                            valid &= std::isfinite(scale.x) && std::isfinite(scale.y) &&
+                                std::isfinite(scale.z);
+                            values.insert(values.end(), {scale.x, scale.y, scale.z});
+                        }
+                        if (valid)
+                            AddAnimationOutput("scale", targetNode, 3, "VEC3", values);
+                    }
+                }
+
+                if (!channels.empty())
+                {
+                    std::string animationName = aseg->pchzName != nullptr
+                        ? aseg->pchzName : "Animation_" + std::to_string(aseg->oid);
+                    animationName += "_Rig_" + std::to_string(aloIndex);
+                    animations.push_back({{"name", animationName}, {"samplers", samplers},
+                        {"channels", channels},
+                        {"extras", {{"repeatMode", static_cast<int>(aseg->segrpt)}}}});
+                }
+            }
+            ++exportedModels;
+        }
+
+        return exportedModels;
+}
+
+bool ExportSw()
+{
+    if (g_psw == nullptr)
+    {
+        ReportRuntimeError("Export", "Cannot export a map without a loaded world");
+        return false;
+    }
+    if (!EnsureExportLevelName())
+        return false;
+    try
+    {
+    std::error_code directoryError;
+    std::filesystem::create_directories(levelName, directoryError);
+    if (directoryError)
+    {
+        ReportRuntimeError("Export", "Could not create map export directory '%s': %s",
+            levelName.c_str(), directoryError.message().c_str());
+        return false;
+    }
 
     // One buffer for everything (geo + textures)
     std::vector<uint8_t> binaryBuffer;
@@ -1330,6 +2199,8 @@ void ExportSw()
     std::vector<json> textures;
     std::vector<json> meshes;
     std::vector<json> nodes;
+    std::vector<json> skins;
+    std::vector<json> animations;
     std::vector<int>  sceneNodes;
 
     // Asset header
@@ -1350,7 +2221,29 @@ void ExportSw()
         });
 
     // Cache: shdID material index (so we reuse images/textures)
-    std::unordered_map<int, int> shdToMaterialIndex;
+    std::unordered_map<uint64_t, int> shdToMaterialIndex;
+    // 0 = opaque, 1 = alpha-tested cutout, 2 = blended transparency.
+    std::unordered_map<int, int> shdAlphaMode;
+    for (ALO* alo : allSWAloObjs)
+    {
+        if (alo == nullptr)
+            continue;
+        for (const GLOB& glob : alo->globset.aglob)
+        {
+            for (const SUBGLOB& sub : glob.asubglob)
+            {
+                if (sub.shdID < 0 || sub.shdID >= static_cast<int>(g_ashd.size()))
+                    continue;
+                int mode = 0;
+                if (glob.rp == RP_Cutout || glob.rp == RP_CutoutAfterProjVolume)
+                    mode = 1;
+                if (glob.rp == RP_Translucent ||
+                    (glob.rp == RP_Background && g_ashd[sub.shdID].grfshd == 2))
+                    mode = 2;
+                shdAlphaMode[sub.shdID] = std::max(shdAlphaMode[sub.shdID], mode);
+            }
+        }
+    }
 
     uint32_t modelNum = 0;
     glm::mat4 model(1.0f);
@@ -1397,7 +2290,16 @@ void ExportSw()
             }
 
             glm::mat4 finalModel = zUpToYUp * model;
-            glm::mat3 normalMat = glm::mat3(glm::transpose(glm::inverse(finalModel)));
+            if (!FFiniteExportMatrix(finalModel))
+            {
+                ReportRuntimeError("Export",
+                    "Skipping map glob %d/%d because its transform is non-finite", i, a);
+                continue;
+            }
+            const glm::mat3 linearModel(finalModel);
+            const float modelDeterminant = glm::determinant(linearModel);
+            const glm::mat3 normalMat = std::fabs(modelDeterminant) > 1.0e-12f
+                ? glm::transpose(glm::inverse(linearModel)) : linearModel;
 
             // GLOB node under this ALO's GLOBSET
             int globNodeIndex = (int)nodes.size();
@@ -1413,11 +2315,29 @@ void ExportSw()
             for (int b = 0; b < (int)glob.asubglob.size(); ++b)
             {
                 auto& sub = glob.asubglob[b];
+                if (sub.cibnd > 0)
+                    continue;
                 const size_t vertCount = sub.vertices.size();
                 const size_t triCount = sub.indices.size();
 
                 if (vertCount == 0 || triCount == 0)
                 {
+                    ++modelNum;
+                    continue;
+                }
+                if (!FValidExportIndices(sub))
+                {
+                    ReportRuntimeError("Export",
+                        "Skipping map mesh %d/%d/%d because an index exceeds its %zu vertices",
+                        i, a, b, vertCount);
+                    ++modelNum;
+                    continue;
+                }
+                if (!FValidExportVertices(sub))
+                {
+                    ReportRuntimeError("Export",
+                        "Skipping map mesh %d/%d/%d because it contains non-finite vertex data",
+                        i, a, b);
                     ++modelNum;
                     continue;
                 }
@@ -1433,19 +2353,22 @@ void ExportSw()
                 int shdID = sub.shdID;
                 if (shdID >= 0 && shdID < (int)g_ashd.size())
                 {
-                    auto it = shdToMaterialIndex.find(shdID);
+                    SHD& shd = g_ashd[shdID];
+                    const int textureFrame = ExportTextureFrame(sub, shd);
+                    const uint64_t materialKey = ExportMaterialKey(shdID, textureFrame);
+                    auto it = shdToMaterialIndex.find(materialKey);
                     if (it == shdToMaterialIndex.end())
                     {
-                        bool wantsAlphaBlend =
-                            glob.rp == RP_Cutout ||
-                            glob.rp == RP_CutoutAfterProjVolume ||
-                            glob.rp == RP_Translucent ||
-                            (glob.rp == RP_Background && shdID >= 0 && shdID < (int)g_ashd.size() && g_ashd[shdID].grfshd == 2);
+                        const int alphaMode = shdAlphaMode[shdID];
 
-                        SHD& shd = g_ashd[shdID];
-                        BMP* bmp = shd.atex[0].abmp[0];
+                        BMP* bmp = nullptr;
+                        if (!shd.atex.empty() &&
+                            textureFrame < static_cast<int>(shd.atex[0].abmp.size()))
+                            bmp = shd.atex[0].abmp[textureFrame];
 
-                        if (bmp && !bmp->diffuseTexture.empty())
+                        std::vector<byte> rgbaReadback;
+                        const byte* rgbaPixels = nullptr;
+                        if (GetBmpBaseRgba8(bmp, rgbaReadback, rgbaPixels))
                         {
                             // ---- Encode BMP as PNG into memory ----
                             PngBuffer png;
@@ -1456,10 +2379,17 @@ void ExportSw()
                                 bmp->bmpWidth,
                                 bmp->bmpHeight,
                                 4,
-                                bmp->diffuseTexture.data(),
+                                rgbaPixels,
                                 bmp->bmpWidth * 4
                             );
 
+                            if (png.data.empty())
+                            {
+                                materialIndex = defaultMaterialIndex;
+                                shdToMaterialIndex[materialKey] = materialIndex;
+                            }
+                            else
+                            {
                             // ---- Append PNG bytes to binaryBuffer ----
                             AlignTo4(binaryBuffer);
                             size_t pngByteOffset = binaryBuffer.size();
@@ -1487,7 +2417,9 @@ void ExportSw()
 
                             json mat = {
                                 {"name", "Material_Shader_" + std::to_string(shdID) +
-                                         (wantsAlphaBlend ? "_Alpha" : "_Opaque")},
+                                         "_Frame_" + std::to_string(textureFrame) +
+                                         (alphaMode == 2 ? "_Alpha" :
+                                          alphaMode == 1 ? "_Cutout" : "_Opaque")},
                                 {"pbrMetallicRoughness", {
                                     {"baseColorTexture", { {"index", textureIndex} }},
                                     {"metallicFactor", 0.0},
@@ -1496,10 +2428,15 @@ void ExportSw()
                             };
 
                             // Alpha mode selection
-                            if (wantsAlphaBlend)
+                            if (alphaMode == 2)
                             {
                                 mat["alphaMode"] = "BLEND";
-                                mat["alphaCutoff"] = 0.0;
+                                mat["doubleSided"] = true;
+                            }
+                            else if (alphaMode == 1)
+                            {
+                                mat["alphaMode"] = "MASK";
+                                mat["alphaCutoff"] = 0.5;
                                 mat["doubleSided"] = true;
                             }
                             else
@@ -1509,12 +2446,13 @@ void ExportSw()
 
                             materialIndex = (int)materials.size();
                             materials.push_back(mat);
-                            shdToMaterialIndex[shdID] = materialIndex;
+                            shdToMaterialIndex[materialKey] = materialIndex;
+                            }
                         }
                         else
                         {
                             materialIndex = defaultMaterialIndex;
-                            shdToMaterialIndex[shdID] = materialIndex;
+                            shdToMaterialIndex[materialKey] = materialIndex;
                         }
                     }
                     else
@@ -1530,11 +2468,15 @@ void ExportSw()
                 // ========= POSITIONS =========
                 AlignTo4(binaryBuffer);
                 size_t posByteOffset = binaryBuffer.size();
+                glm::vec3 positionMin((std::numeric_limits<float>::max)());
+                glm::vec3 positionMax((std::numeric_limits<float>::lowest)());
 
                 for (auto& v : sub.vertices)
                 {
                     glm::vec4 vt = finalModel * glm::vec4(v.pos, 1.0f);
-                    glm::vec3 p = glm::vec3(vt) / vt.w;
+                    glm::vec3 p = glm::vec3(vt);
+                    positionMin = glm::min(positionMin, p);
+                    positionMax = glm::max(positionMax, p);
 
                     AppendFloat(binaryBuffer, p.x);
                     AppendFloat(binaryBuffer, p.y);
@@ -1556,7 +2498,9 @@ void ExportSw()
                     {"byteOffset", 0},
                     {"componentType", 5126}, // FLOAT
                     {"count", vertCount},
-                    {"type", "VEC3"}
+                    {"type", "VEC3"},
+                    {"min", {positionMin.x, positionMin.y, positionMin.z}},
+                    {"max", {positionMax.x, positionMax.y, positionMax.z}}
                     });
 
                 // ========= NORMALS =========
@@ -1565,9 +2509,10 @@ void ExportSw()
 
                 for (auto& v : sub.vertices)
                 {
-                    AppendFloat(binaryBuffer, v.normal.x);
-                    AppendFloat(binaryBuffer, v.normal.y);
-                    AppendFloat(binaryBuffer, v.normal.z);
+                    const glm::vec3 normal = TransformExportNormal(normalMat, v.normal);
+                    AppendFloat(binaryBuffer, normal.x);
+                    AppendFloat(binaryBuffer, normal.y);
+                    AppendFloat(binaryBuffer, normal.z);
                 }
                 size_t nrmByteLength = binaryBuffer.size() - nrmByteOffset;
 
@@ -1712,11 +2657,30 @@ void ExportSw()
         }
     }
 
+    const int celBorderMaterialIndex = static_cast<int>(materials.size());
+    materials.push_back({{"name", "ProjectCane_CelBorder"},
+        {"pbrMetallicRoughness", {{"baseColorFactor", {0.0, 0.0, 0.0, 1.0}},
+            {"metallicFactor", 0.0}, {"roughnessFactor", 1.0}}}});
+    const int staticCelBorderCount = AppendStaticCelBorders(binaryBuffer, bufferViews,
+        accessors, meshes, nodes, sceneNodes, celBorderMaterialIndex);
+    const int skeletalModelCount = AppendSkeletalMeshes(binaryBuffer, bufferViews,
+        accessors, meshes, nodes, skins, animations, sceneNodes, shdToMaterialIndex,
+        celBorderMaterialIndex);
+    if (skeletalModelCount > 0)
+        std::cout << "Included " << skeletalModelCount << " skeletal model(s) in the map GLB\n";
+    if (staticCelBorderCount > 0)
+        std::cout << "Included " << staticCelBorderCount << " static cel-border set(s)\n";
+
     // ===================== Build BIN chunk (padded) =====================
     std::vector<uint8_t> binChunk = binaryBuffer;
     while (binChunk.size() % 4 != 0)
         binChunk.push_back(0x00);
-    uint32_t binChunkLength = (uint32_t)binChunk.size();
+    if (binChunk.size() > (std::numeric_limits<uint32_t>::max)())
+    {
+        ReportRuntimeError("Export", "Map export exceeds the GLB 4 GiB size limit");
+        return false;
+    }
+    uint32_t binChunkLength = static_cast<uint32_t>(binChunk.size());
 
     // ===================== Hook into glTF JSON =====================
     gltf["buffers"] = json::array({
@@ -1730,6 +2694,8 @@ void ExportSw()
     if (!images.empty())   gltf["images"] = images;
     if (!textures.empty()) gltf["textures"] = textures;
     gltf["meshes"] = meshes;
+    if (!skins.empty()) gltf["skins"] = skins;
+    if (!animations.empty()) gltf["animations"] = animations;
 
     // Add lights (may modify nodes + sceneNodes + gltf.extensions)
     ExportLights(gltf, nodes, sceneNodes, zUpToYUp);
@@ -1746,17 +2712,31 @@ void ExportSw()
     std::vector<uint8_t> jsonChunk(jsonStr.begin(), jsonStr.end());
     while (jsonChunk.size() % 4 != 0)
         jsonChunk.push_back(0x20); // spaces
-    uint32_t jsonChunkLength = (uint32_t)jsonChunk.size();
+    if (jsonChunk.size() > (std::numeric_limits<uint32_t>::max)())
+    {
+        ReportRuntimeError("Export", "Map JSON exceeds the GLB 4 GiB size limit");
+        return false;
+    }
+    uint32_t jsonChunkLength = static_cast<uint32_t>(jsonChunk.size());
 
     // ===================== GLB header & chunks =====================
     uint32_t magic = 0x46546C67; // "glTF"
     uint32_t version = 2;
-    uint32_t totalLength = 12 + 8 + jsonChunkLength + 8 + binChunkLength;
+    const uint64_t totalLength64 = 12ull + 8ull + jsonChunkLength + 8ull + binChunkLength;
+    if (totalLength64 > (std::numeric_limits<uint32_t>::max)())
+    {
+        ReportRuntimeError("Export", "Map export exceeds the GLB 4 GiB size limit");
+        return false;
+    }
+    uint32_t totalLength = static_cast<uint32_t>(totalLength64);
 
     std::string glbPath = levelName + "/" + levelName + ".glb";
-    std::ofstream out(glbPath, std::ios::binary);
+    std::ofstream out(glbPath, std::ios::binary | std::ios::trunc);
     if (!out)
-        return;
+    {
+        ReportRuntimeError("Export", "Could not open map export '%s'", glbPath.c_str());
+        return false;
+    }
 
     auto WriteU32 = [&](uint32_t v) {
         out.write(reinterpret_cast<const char*>(&v), 4);
@@ -1778,6 +2758,18 @@ void ExportSw()
     out.write(reinterpret_cast<const char*>(binChunk.data()), binChunk.size());
 
     out.close();
+    if (!out)
+    {
+        ReportRuntimeError("Export", "Failed while writing map export '%s'", glbPath.c_str());
+        return false;
+    }
+    return true;
+    }
+    catch (const std::exception& error)
+    {
+        ReportRuntimeError("Export", "Map export failed: %s", error.what());
+        return false;
+    }
 }
 
 inline bool ComputeBarycentric(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b, const glm::vec2& c, float& w0, float& w1, float& w2)
@@ -1825,6 +2817,13 @@ inline glm::vec4 SampleRGBA8(const std::vector<byte>& data, int w, int h, float 
     float b = data[idx + 2] / 255.0f;
     float a = data[idx + 3] / 255.0f;
     return glm::vec4(r, g, b, a);
+}
+
+static glm::vec4 SampleExportImage(const ExportRgbaImage& image, float u, float v,
+                                   const glm::vec4& defaultColor)
+{
+    return SampleRGBA8(image.pixels, static_cast<int>(image.width),
+        static_cast<int>(image.height), u, v, defaultColor);
 }
 
 MaterialCPU ProcessGlobLightingCPU(const glm::vec3& vertexColorRGB, float objectShadow, float objectMidtone, const glm::vec3& lightAccum)
@@ -1905,17 +2904,15 @@ MaterialCPU EvaluateLightingAtPointCPU(const glm::vec3& worldPos, const glm::vec
     return ProcessGlobLightingCPU(vertexColorRGB, objectShadow, objectMidtone, lightAccum);
 }
 
-glm::vec4 ComputeBakedVertexColorThreeWay(const SUBGLOB& sub, const glm::mat4& model, const glm::mat3& normalMat, const BMP* bmp, const VERTICE& v)
+glm::vec4 ComputeBakedVertexColorThreeWay(const SUBGLOB& sub, const glm::mat4& model,
+    const glm::mat3& normalMat, const BakedTextureSet& textures, const VERTICE& v)
 {
-    if (!bmp || bmp->bmpWidth <= 0 || bmp->bmpHeight <= 0)
+    if (!textures.hasDiffuse)
         return v.color; // fallback
-
-    int w = bmp->bmpWidth;
-    int h = bmp->bmpHeight;
 
     // World space
     glm::vec3 worldPos = glm::vec3(model * glm::vec4(v.pos, 1.0f));
-    glm::vec3 normalWorld = glm::normalize(normalMat * v.normal);
+    glm::vec3 normalWorld = TransformExportNormal(normalMat, v.normal);
 
     // Game per-vertex color used in lighting
     glm::vec3 vertexBaseColor = glm::vec3(v.color);
@@ -1928,9 +2925,12 @@ glm::vec4 ComputeBakedVertexColorThreeWay(const SUBGLOB& sub, const glm::mat4& m
     float u = glm::clamp(uv.x, 0.0f, 1.0f);
     float vv = glm::clamp(uv.y, 0.0f, 1.0f);
 
-    glm::vec4 shCol = SampleRGBA8(bmp->shadowTexture, w, h, u, vv, glm::vec4(0.0f));
-    glm::vec4 difCol = SampleRGBA8(bmp->diffuseTexture, w, h, u, vv, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-    glm::vec4 satCol = SampleRGBA8(bmp->saturateTexture, w, h, u, vv, glm::vec4(0.0f));
+    glm::vec4 shCol = textures.hasAmbient
+        ? SampleExportImage(textures.ambient, u, vv, glm::vec4(0.0f)) : glm::vec4(0.0f);
+    glm::vec4 difCol = SampleExportImage(textures.diffuse, u, vv,
+        glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+    glm::vec4 satCol = textures.hasSaturate
+        ? SampleExportImage(textures.saturate, u, vv, glm::vec4(0.0f)) : glm::vec4(0.0f);
 
     glm::vec3 shRGB = glm::vec3(shCol);
     glm::vec3 difRGB = glm::vec3(difCol);
@@ -1966,6 +2966,8 @@ glm::vec4 ComputeBakedVertexColorThreeWay(const SUBGLOB& sub, const glm::mat4& m
 
 void ExportLights(json& gltf, std::vector<json>& nodes, std::vector<int>& sceneNodes, const glm::mat4& zUpToYUp)
 {
+    if (g_psw == nullptr)
+        return;
     // --- 1) Mark extension as used/required ---
     if (!gltf.contains("extensionsUsed") || !gltf["extensionsUsed"].is_array())
         gltf["extensionsUsed"] = json::array();
@@ -2030,7 +3032,7 @@ void ExportLights(json& gltf, std::vector<json>& nodes, std::vector<int>& sceneN
 
             json lightNode;
             lightNode["name"] = "DirectionalLightNode_0";
-            lightNode["rotation"] = { pDir->xf.matWorld[2][0], pDir->xf.matWorld[2][1], pDir->xf.matWorld[2][2], 1.0 };
+            lightNode["rotation"] = { q.x, q.y, q.z, q.w };
             lightNode["extensions"] = {
                 { "KHR_lights_punctual", { { "light", lightIndex } } }
             };
@@ -2096,9 +3098,25 @@ void ExportLights(json& gltf, std::vector<json>& nodes, std::vector<int>& sceneN
     }
 }
 
-void ExportSwLightsBaked()
+bool ExportSwLightsBaked()
 {
-    std::filesystem::create_directory(levelName);
+    if (g_psw == nullptr)
+    {
+        ReportRuntimeError("Export", "Cannot export a baked map without a loaded world");
+        return false;
+    }
+    if (!EnsureExportLevelName())
+        return false;
+    try
+    {
+    std::error_code directoryError;
+    std::filesystem::create_directories(levelName, directoryError);
+    if (directoryError)
+    {
+        ReportRuntimeError("Export", "Could not create baked-map export directory '%s': %s",
+            levelName.c_str(), directoryError.message().c_str());
+        return false;
+    }
 
     std::vector<uint8_t> binaryBuffer;
 
@@ -2110,6 +3128,8 @@ void ExportSwLightsBaked()
     std::vector<json> textures;
     std::vector<json> meshes;
     std::vector<json> nodes;
+    std::vector<json> skins;
+    std::vector<json> animations;
     std::vector<int>  sceneNodes;
 
     gltf["asset"] = {
@@ -2154,11 +3174,12 @@ void ExportSwLightsBaked()
         materials.push_back(mat);
     }
 
-    std::unordered_map<int, int> shdToMaterialIndex;
+    std::unordered_map<uint64_t, int> shdToMaterialIndex;
+    std::unordered_map<uint64_t, BakedTextureSet> bakedTextures;
 
-    // PASS 0: Determine which SHDs need blending
-    struct ShdUsageInfo { bool wantsAlphaBlend = false; };
-    std::unordered_map<int, ShdUsageInfo> shdUsage;
+    // PASS 0: Determine which shader/frame pairs are visible and how they blend.
+    struct ShdUsageInfo { int shdID = -1; int frame = 0; int alphaMode = 0; };
+    std::unordered_map<uint64_t, ShdUsageInfo> shdUsage;
 
     for (auto* alo : allSWAloObjs)
     {
@@ -2172,50 +3193,51 @@ void ExportSwLightsBaked()
                 if (shdID < 0 || shdID >= (int)g_ashd.size()) continue;
 
                 SHD& shd = g_ashd[shdID];
-                bool alpha = false;
-
+                const int frame = ExportTextureFrame(sub, shd);
+                const uint64_t materialKey = ExportMaterialKey(shdID, frame);
+                ShdUsageInfo& usage = shdUsage[materialKey];
+                usage.shdID = shdID;
+                usage.frame = frame;
                 if (glob.rp == RP_Cutout || glob.rp == RP_CutoutAfterProjVolume || glob.rp == RP_Translucent)
                 {
-                    alpha = true;
+                    usage.alphaMode = std::max(usage.alphaMode,
+                        glob.rp == RP_Translucent ? 2 : 1);
                 }
 
                 if (glob.rp == RP_Background && shd.grfshd == 2)
-                    alpha = true;
-
-                if (alpha)
-                    shdUsage[shdID].wantsAlphaBlend = true;
+                    usage.alphaMode = 2;
             }
         }
     }
 
     // PASS 1: Build materials
-    for (int shdID = 0; shdID < (int)g_ashd.size(); shdID++)
+    for (const auto& [materialKey, usage] : shdUsage)
     {
+        const int shdID = usage.shdID;
         SHD& shd = g_ashd[shdID];
-        if (shd.atex.empty() || shd.atex[0].abmp.empty() || !shd.atex[0].abmp[0])
-            continue;
-
-        BMP* bmp = shd.atex[0].abmp[0];
-        if (!bmp || bmp->diffuseTexture.empty())
+        BakedTextureSet textureSet = LoadBakedTextureSet(shd, usage.frame);
+        if (!textureSet.hasDiffuse)
         {
-            shdToMaterialIndex[shdID] = defaultMaterialIndex;
+            shdToMaterialIndex[materialKey] = defaultMaterialIndex;
             continue;
         }
+        bakedTextures.emplace(materialKey, std::move(textureSet));
+        const BakedTextureSet& storedTextures = bakedTextures.at(materialKey);
 
         PngBuffer png;
         stbi_write_png_to_func(
             PngWriteCallback,
             &png,
-            bmp->bmpWidth,
-            bmp->bmpHeight,
+            static_cast<int>(storedTextures.diffuse.width),
+            static_cast<int>(storedTextures.diffuse.height),
             4,
-            bmp->diffuseTexture.data(),
-            bmp->bmpWidth * 4
+            storedTextures.diffuse.pixels.data(),
+            static_cast<int>(storedTextures.diffuse.width * 4)
         );
 
         if (png.data.empty())
         {
-            shdToMaterialIndex[shdID] = defaultMaterialIndex;
+            shdToMaterialIndex[materialKey] = defaultMaterialIndex;
             continue;
         }
 
@@ -2239,10 +3261,11 @@ void ExportSwLightsBaked()
         int texIdx = (int)textures.size();
         textures.push_back({ {"source",imgIdx} });
 
-        bool blend = shdUsage[shdID].wantsAlphaBlend;
+        const int alphaMode = usage.alphaMode;
 
         json mat = {
-            {"name","Material_Shader_" + std::to_string(shdID)},
+            {"name","Material_Shader_" + std::to_string(shdID) +
+                "_Frame_" + std::to_string(usage.frame)},
             {"pbrMetallicRoughness",{
                 {"baseColorTexture",{{"index",texIdx}}},
                 {"metallicFactor",0.0},
@@ -2251,12 +3274,15 @@ void ExportSwLightsBaked()
         };
 
         EnsureUnlitExtension(mat);
-        mat["alphaMode"] = blend ? "BLEND" : "OPAQUE";
-        if (blend) mat["doubleSided"] = true;
+        mat["alphaMode"] = alphaMode == 2 ? "BLEND" : alphaMode == 1 ? "MASK" : "OPAQUE";
+        if (alphaMode == 1)
+            mat["alphaCutoff"] = 0.5;
+        if (alphaMode != 0)
+            mat["doubleSided"] = true;
 
         int matIndex = (int)materials.size();
         materials.push_back(mat);
-        shdToMaterialIndex[shdID] = matIndex;
+        shdToMaterialIndex[materialKey] = matIndex;
     }
 
     // PASS 2: GEOMETRY
@@ -2295,9 +3321,21 @@ void ExportSwLightsBaked()
                 modelZ = modelZ * *glob.pdmat;
 
             glm::mat4 modelY = zUpToYUp * modelZ;
+            if (!FFiniteExportMatrix(modelZ) || !FFiniteExportMatrix(modelY))
+            {
+                ReportRuntimeError("Export",
+                    "Skipping baked map glob %u/%u because its transform is non-finite",
+                    aloIndex, globIndex);
+                globIndex++;
+                continue;
+            }
 
-            glm::mat3 normalMatZ = glm::mat3(glm::transpose(glm::inverse(modelZ)));
-            glm::mat3 normalMatY = glm::mat3(glm::transpose(glm::inverse(modelY)));
+            const glm::mat3 linearModelZ(modelZ);
+            const glm::mat3 linearModelY(modelY);
+            const glm::mat3 normalMatZ = std::fabs(glm::determinant(linearModelZ)) > 1.0e-12f
+                ? glm::transpose(glm::inverse(linearModelZ)) : linearModelZ;
+            const glm::mat3 normalMatY = std::fabs(glm::determinant(linearModelY)) > 1.0e-12f
+                ? glm::transpose(glm::inverse(linearModelY)) : linearModelY;
 
             // GLOB node under this ALO's GLOBSET
             int globNodeIndex = (int)nodes.size();
@@ -2314,6 +3352,11 @@ void ExportSwLightsBaked()
 
             for (auto& sub : glob.asubglob)
             {
+                if (sub.cibnd > 0)
+                {
+                    subIndex++;
+                    continue;
+                }
                 size_t vc = sub.vertices.size();
                 size_t tc = sub.indices.size();
                 if (vc == 0 || tc == 0)
@@ -2321,27 +3364,50 @@ void ExportSwLightsBaked()
                     subIndex++;
                     continue;
                 }
+                if (!FValidExportIndices(sub))
+                {
+                    ReportRuntimeError("Export",
+                        "Skipping baked-map mesh %u/%u/%u because an index exceeds its %zu vertices",
+                        aloIndex, globIndex, subIndex, vc);
+                    subIndex++;
+                    continue;
+                }
+                if (!FValidExportVertices(sub))
+                {
+                    ReportRuntimeError("Export",
+                        "Skipping baked map mesh %u/%u/%u because it contains non-finite vertex data",
+                        aloIndex, globIndex, subIndex);
+                    subIndex++;
+                    continue;
+                }
 
                 int matIndex = defaultMaterialIndex;
+                uint64_t materialKey = 0;
                 if (sub.shdID >= 0 && sub.shdID < (int)g_ashd.size())
                 {
-                    auto it = shdToMaterialIndex.find(sub.shdID);
+                    const SHD& shd = g_ashd[sub.shdID];
+                    materialKey = ExportMaterialKey(sub.shdID, ExportTextureFrame(sub, shd));
+                    auto it = shdToMaterialIndex.find(materialKey);
                     if (it != shdToMaterialIndex.end())
                         matIndex = it->second;
                 }
 
-                BMP* bmp = nullptr;
-                if (sub.pshd && !sub.pshd->atex.empty() && !sub.pshd->atex[0].abmp.empty())
-                    bmp = sub.pshd->atex[0].abmp[0];
-
-                bool isThreeWay = (sub.pshd && sub.pshd->shdk == SHDK_ThreeWay && bmp != nullptr);
+                const auto bakedTexture = bakedTextures.find(materialKey);
+                const bool isThreeWay = sub.shdID >= 0 &&
+                    sub.shdID < static_cast<int>(g_ashd.size()) &&
+                    g_ashd[sub.shdID].shdk == SHDK_ThreeWay &&
+                    bakedTexture != bakedTextures.end();
 
                 // POSITIONS (Y-up)
                 AlignTo4(binaryBuffer);
                 size_t posOffset = binaryBuffer.size();
+                glm::vec3 positionMin((std::numeric_limits<float>::max)());
+                glm::vec3 positionMax((std::numeric_limits<float>::lowest)());
                 for (auto& v : sub.vertices)
                 {
                     glm::vec3 p = glm::vec3(modelY * glm::vec4(v.pos, 1.0f));
+                    positionMin = glm::min(positionMin, p);
+                    positionMax = glm::max(positionMax, p);
                     AppendFloat(binaryBuffer, p.x);
                     AppendFloat(binaryBuffer, p.y);
                     AppendFloat(binaryBuffer, p.z);
@@ -2362,7 +3428,9 @@ void ExportSwLightsBaked()
                     {"byteOffset",0},
                     {"componentType",5126},
                     {"count",vc},
-                    {"type","VEC3"}
+                    {"type","VEC3"},
+                    {"min", {positionMin.x, positionMin.y, positionMin.z}},
+                    {"max", {positionMax.x, positionMax.y, positionMax.z}}
                     });
 
                 // NORMALS (Y-up)
@@ -2370,7 +3438,7 @@ void ExportSwLightsBaked()
                 size_t nrmOffset = binaryBuffer.size();
                 for (auto& v : sub.vertices)
                 {
-                    glm::vec3 n = glm::normalize(normalMatY * v.normal);
+                    glm::vec3 n = TransformExportNormal(normalMatY, v.normal);
                     AppendFloat(binaryBuffer, n.x);
                     AppendFloat(binaryBuffer, n.y);
                     AppendFloat(binaryBuffer, n.z);
@@ -2408,7 +3476,7 @@ void ExportSwLightsBaked()
                             sub,
                             modelZ,
                             normalMatZ,
-                            bmp,
+                            bakedTexture->second,
                             v
                         );
                     }
@@ -2541,12 +3609,33 @@ void ExportSwLightsBaked()
         aloIndex++;
     }
 
+    json celBorderMaterial = {{"name", "ProjectCane_CelBorder"},
+        {"pbrMetallicRoughness", {{"baseColorFactor", {0.0, 0.0, 0.0, 1.0}},
+            {"metallicFactor", 0.0}, {"roughnessFactor", 1.0}}}};
+    EnsureUnlitExtension(celBorderMaterial);
+    const int celBorderMaterialIndex = static_cast<int>(materials.size());
+    materials.push_back(std::move(celBorderMaterial));
+    const int staticCelBorderCount = AppendStaticCelBorders(binaryBuffer, bufferViews,
+        accessors, meshes, nodes, sceneNodes, celBorderMaterialIndex);
+    const int skeletalModelCount = AppendSkeletalMeshes(binaryBuffer, bufferViews,
+        accessors, meshes, nodes, skins, animations, sceneNodes, shdToMaterialIndex,
+        celBorderMaterialIndex);
+    if (skeletalModelCount > 0)
+        std::cout << "Included " << skeletalModelCount << " skeletal model(s) in the baked map GLB\n";
+    if (staticCelBorderCount > 0)
+        std::cout << "Included " << staticCelBorderCount << " static cel-border set(s)\n";
+
     // Build GLB
     std::vector<uint8_t> binChunk = binaryBuffer;
     while (binChunk.size() % 4 != 0) binChunk.push_back(0);
 
+    if (binChunk.size() > (std::numeric_limits<uint32_t>::max)())
+    {
+        ReportRuntimeError("Export", "Baked-map export exceeds the GLB 4 GiB size limit");
+        return false;
+    }
     gltf["buffers"] = json::array({
-        json{{"byteLength",(uint32_t)binChunk.size()}}
+        json{{"byteLength",static_cast<uint32_t>(binChunk.size())}}
         });
 
     gltf["bufferViews"] = bufferViews;
@@ -2555,6 +3644,8 @@ void ExportSwLightsBaked()
     if (!images.empty()) gltf["images"] = images;
     if (!textures.empty()) gltf["textures"] = textures;
     gltf["meshes"] = meshes;
+    if (!skins.empty()) gltf["skins"] = skins;
+    if (!animations.empty()) gltf["animations"] = animations;
     gltf["nodes"] = nodes;
 
     gltf["scenes"] = json::array({
@@ -2566,14 +3657,22 @@ void ExportSwLightsBaked()
     std::vector<uint8_t> jsonChunk(jsonStr.begin(), jsonStr.end());
     while (jsonChunk.size() % 4 != 0) jsonChunk.push_back(0x20);
 
-    uint32_t totalLength =
-        12 +                       // header
-        8 + (uint32_t)jsonChunk.size() +     // JSON chunk header + data
-        8 + (uint32_t)binChunk.size();       // BIN chunk header + data
+    const uint64_t totalLength64 = 12ull + 8ull + jsonChunk.size() + 8ull + binChunk.size();
+    if (jsonChunk.size() > (std::numeric_limits<uint32_t>::max)() ||
+        totalLength64 > (std::numeric_limits<uint32_t>::max)())
+    {
+        ReportRuntimeError("Export", "Baked-map export exceeds the GLB 4 GiB size limit");
+        return false;
+    }
+    uint32_t totalLength = static_cast<uint32_t>(totalLength64);
 
-    std::string outPath = levelName + "/" + levelName + ".glb";
-    std::ofstream out(outPath, std::ios::binary);
-    if (!out) return;
+    std::string outPath = levelName + "/" + levelName + "_Baked.glb";
+    std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
+    if (!out)
+    {
+        ReportRuntimeError("Export", "Could not open baked-map export '%s'", outPath.c_str());
+        return false;
+    }
 
     auto WriteU32 = [&](uint32_t v)
         {
@@ -2591,12 +3690,62 @@ void ExportSwLightsBaked()
     WriteU32((uint32_t)binChunk.size());
     WriteU32(0x004E4942);
     out.write((const char*)binChunk.data(), binChunk.size());
+    out.close();
+    if (!out)
+    {
+        ReportRuntimeError("Export", "Failed while writing baked-map export '%s'", outPath.c_str());
+        return false;
+    }
+    return true;
+    }
+    catch (const std::exception& error)
+    {
+        ReportRuntimeError("Export", "Baked-map export failed: %s", error.what());
+        return false;
+    }
 }
 
 void ExportTextures()
 {
-    std::string textureDir = levelName + "/Textures";
-    std::filesystem::create_directories(textureDir);
+    const std::filesystem::path textureDir =
+        std::filesystem::path(levelName) / "Textures";
+    std::error_code directoryError;
+    std::filesystem::create_directories(textureDir, directoryError);
+    if (directoryError)
+    {
+        ReportRuntimeError("Export", "Could not create texture export directory '%s': %s",
+            textureDir.string().c_str(), directoryError.message().c_str());
+        return;
+    }
+
+    auto ImageFromIndex = [](int32_t imageIndex) -> BMP*
+    {
+        return imageIndex >= 0 && static_cast<size_t>(imageIndex) < g_abmp.size()
+            ? &g_abmp[static_cast<size_t>(imageIndex)] : nullptr;
+    };
+
+    auto WriteImage = [&](const std::filesystem::path& outputPath, BMP* bmp,
+                          bool flipVertically) -> bool
+    {
+        std::vector<byte> rgbaReadback;
+        const byte* rgbaPixels = nullptr;
+        if (!GetBmpBaseRgba8(bmp, rgbaReadback, rgbaPixels))
+            return false;
+
+        const std::string outputName = outputPath.string();
+        stbi_flip_vertically_on_write(flipVertically ? 1 : 0);
+        const int written = stbi_write_png(outputName.c_str(),
+            static_cast<int>(bmp->bmpWidth), static_cast<int>(bmp->bmpHeight), 4,
+            rgbaPixels, static_cast<int>(bmp->bmpWidth * 4));
+        stbi_flip_vertically_on_write(0);
+        if (written == 0)
+        {
+            ReportRuntimeError("Export", "Could not write texture PNG '%s'",
+                outputName.c_str());
+            return false;
+        }
+        return true;
+    };
 
     for (size_t i = 0; i < g_ashd.size(); ++i)
     {
@@ -2606,42 +3755,34 @@ void ExportTextures()
         {
             TEX& tex = shd.atex[t];
 
-            for (size_t f = 0; f < tex.abmp.size(); ++f)
+            const size_t frameCount = std::min({
+                tex.ambientImageIndex.size(),
+                tex.diffuseImageIndex.size(),
+                tex.saturateImageIndex.size()
+            });
+            for (size_t f = 0; f < frameCount; ++f)
             {
-                BMP* bmp = tex.abmp[f];
+                char prefixBuffer[128]{};
+                std::snprintf(prefixBuffer, sizeof(prefixBuffer),
+                    "shader_%03zu_tex_%02zu_frame_%02zu", i, t, f);
+                const std::string prefix(prefixBuffer);
 
-                if (bmp == nullptr)
-                    continue;
+                BMP* ambient = ImageFromIndex(tex.ambientImageIndex[f]);
+                BMP* diffuse = ImageFromIndex(tex.diffuseImageIndex[f]);
+                BMP* saturate = ImageFromIndex(tex.saturateImageIndex[f]);
 
-                char filename[512];
+                if (ambient != nullptr)
+                    WriteImage(textureDir / (prefix + "_shadow.png"), ambient, true);
 
-                if (!bmp->shadowTexture.empty())
-                {
-                    snprintf(filename, sizeof(filename), "%s/shader_%03zu_tex_%02zu_frame_%02zu_shadow.png",textureDir.c_str(), i, t, f);
-                    stbi_flip_vertically_on_write(1);
-                    stbi_write_png(filename, bmp->bmpWidth, bmp->bmpHeight, 4, bmp->shadowTexture.data(), bmp->bmpWidth * 4);
-                    stbi_flip_vertically_on_write(0);
-                }
+                // Rendering falls back to ambient when a texture has no distinct
+                // diffuse image, so export the same effective diffuse source.
+                if (diffuse == nullptr)
+                    diffuse = ambient;
+                if (diffuse != nullptr)
+                    WriteImage(textureDir / (prefix + "_diffuse.png"), diffuse, true);
 
-                const std::vector<byte>* diffusePixels = &bmp->diffuseTexture;
-                if (f < tex.diffuseTexture.size() && !tex.diffuseTexture[f].empty())
-                    diffusePixels = &tex.diffuseTexture[f];
-
-                if (!diffusePixels->empty())
-                {
-                    snprintf(filename, sizeof(filename), "%s/shader_%03zu_tex_%02zu_frame_%02zu_diffuse.png", textureDir.c_str(), i, t, f);
-                    stbi_flip_vertically_on_write(1);
-                    stbi_write_png(filename, bmp->bmpWidth, bmp->bmpHeight, 4, diffusePixels->data(), bmp->bmpWidth * 4);
-                    stbi_flip_vertically_on_write(0);
-                }
-
-                if (!bmp->saturateTexture.empty())
-                {
-                    snprintf(filename, sizeof(filename), "%s/shader_%03zu_tex_%02zu_frame_%02zu_saturate.png", textureDir.c_str(), i, t, f);
-                    stbi_flip_vertically_on_write(1);
-                    stbi_write_png(filename, bmp->bmpWidth, bmp->bmpHeight, 4, bmp->saturateTexture.data(), bmp->bmpWidth * 4);
-                    stbi_flip_vertically_on_write(0);
-                }
+                if (saturate != nullptr)
+                    WriteImage(textureDir / (prefix + "_saturate.png"), saturate, true);
             }
         }
     }
@@ -2650,14 +3791,9 @@ void ExportTextures()
     {
         BMP* bmp = g_afontBrx[i].m_pbmp;
 
-        if (!bmp || bmp->diffuseTexture.empty())
-            continue;
-
-        char filename[512];
-        snprintf(filename, sizeof(filename), "%s/font_%03zu.png", textureDir.c_str(), i);
-
-        stbi_write_png(filename, bmp->bmpWidth, bmp->bmpHeight, 4,
-            bmp->diffuseTexture.data(), bmp->bmpWidth * 4);
+        char fontName[64]{};
+        std::snprintf(fontName, sizeof(fontName), "font_%03zu.png", i);
+        WriteImage(textureDir / fontName, bmp, false);
     }
 
 }

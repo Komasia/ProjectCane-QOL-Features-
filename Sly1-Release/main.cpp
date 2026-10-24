@@ -20,6 +20,7 @@
 #include "runtime_error.h"
 #include "emitter.h"
 #include "blip.h"
+#include "content.h"
 #include "../platform/platform.h"
 #include <atomic>
 #include <chrono>
@@ -238,7 +239,7 @@ void RunGameFrame()
     // scene color/depth textures, so it always renders into the plain FBO.
     // Switches "Fullscreen" between exclusive and borderless when DLSS Frame
     // Generation turns on/off (no-op otherwise).
-    ApplyWindowModeSettings(g_windowMode);
+    UpdateWindowModeForDlss();
 
     const bool fDlss = FDlssActive();
     // Temporal FSR (FSR 4 / 3.1) is also the anti-aliaser and needs the plain
@@ -302,7 +303,6 @@ void RunGameFrame()
 
         if (g_fRenderModels == true)
         {
-            g_worldMapDrawnCount = 0;
             RenderSw(g_psw, g_pcm);
             RenderUi(&g_ui);
             DrawSw(g_psw, g_pcm);
@@ -725,6 +725,7 @@ int RunApplication(const std::vector<std::string>& arguments)
     try
     {
 		cane::ConfigureRuntime(arguments);
+        RefreshContentPackage(cane::DataDirectory());
         Startup();
 		#ifdef _WIN32
 		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
@@ -751,6 +752,7 @@ int RunApplication(const std::vector<std::string>& arguments)
 			DeleteWorld(g_psw);
 
 		ShutdownSound();
+		ShutdownControllerInput();
 		FreeTvGL();
 		ShutdownFsr();
 		ShutdownDlss();
@@ -790,6 +792,7 @@ void Startup()
 	// takes effect only after restarting the program.
 	LoadDebugModeSetting();
     g_gl.InitGL();
+    StartupControllerInput();
     glfwSwapInterval(g_fVsync ? 1 : 0);
     // NVIDIA DLSS through Streamline. Safe on any GPU: it reports "not
     // available" and leaves the normal OpenGL path untouched when it can't run.

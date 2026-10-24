@@ -1,6 +1,7 @@
 #include "stepzap.h"
 #include "gl.h"
 #include <cstdio>
+#include "cm.h"
 #include "jt.h"
 #include "stephide.h"
 #include "actval.h"
@@ -140,10 +141,14 @@ void FinishJtZap (JT* pjt)
 
 int FTakeJtDamage(JT* pjt, ZPR* pzpr)
 {
+    TraceRaleighCameraDamageEvent(static_cast<int>(pzpr->zpk), pzpr->ploSource, "received");
     const bool fInvulnerable = FInvulnerableJt(pjt, pzpr->zpk);
 
     if (fInvulnerable)
+    {
+        TraceRaleighCameraDamageEvent(static_cast<int>(pzpr->zpk), pzpr->ploSource, "invulnerable");
         return 0;
+    }
 
     // Damage while hiding in a basket knocks JT back into the jump state.
     if (pjt->jts == 6 && pjt->jthk == 2)
@@ -152,6 +157,7 @@ int FTakeJtDamage(JT* pjt, ZPR* pzpr)
 
         HandleLoSpliceEvent(pjt->phbsk, 19, 1, (void**)apzpr);
         SetJtJts(pjt, 2, 5);
+        TraceRaleighCameraDamageEvent(static_cast<int>(pzpr->zpk), pzpr->ploSource, "basket_knockback");
         return 0;
     }
 
@@ -164,6 +170,9 @@ int FTakeJtDamage(JT* pjt, ZPR* pzpr)
         pjt->fFlash == 0 &&
         (g_grfcht & 1) == 0 &&
         !FSwHandsOff(pjt->psw);
+
+    TraceRaleighCameraDamageEvent(static_cast<int>(pzpr->zpk), pzpr->ploSource,
+        fCanStartDamage ? "accepted" : "blocked_by_state");
 
     if (fCanStartDamage)
     {
@@ -860,8 +869,7 @@ void RenderJtSelfZap(JT* pjt, CM* pcm, RO* pro)
             rpl.ro.darken = 1.0f;
             rpl.ro.warpType = WARP_NONE;
 
-            if (g_translucentAddCount < static_cast<int>(g_translucentAddPrpl.size()))
-                g_translucentAddPrpl[g_translucentAddCount++] = rpl;
+            QueueTranslucentAddRpl(rpl);
         }
         else if (pjt->jtbs == JTBS_Zap_Electric)
         {
@@ -873,8 +881,7 @@ void RenderJtSelfZap(JT* pjt, CM* pcm, RO* pro)
             rpl.ro.warpType = WARP_NONE;
             // SubmitRpl assigns DrawGlob to ordinary translucent entries.
             // This is a procedural halo, so retain its own draw callback.
-            if (g_translucentAddCount < static_cast<int>(g_translucentAddPrpl.size()))
-                g_translucentAddPrpl[g_translucentAddCount++] = rpl;
+            QueueTranslucentAddRpl(rpl);
         }
         else
         {
@@ -885,8 +892,7 @@ void RenderJtSelfZap(JT* pjt, CM* pcm, RO* pro)
             rpl.ro.darken = 1.0f;
             rpl.ro.warpType = WARP_NONE;
 
-            if (g_translucentAddCount < static_cast<int>(g_translucentAddPrpl.size()))
-                g_translucentAddPrpl[g_translucentAddCount++] = rpl;
+            QueueTranslucentAddRpl(rpl);
         }
     }
 

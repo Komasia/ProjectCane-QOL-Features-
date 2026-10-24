@@ -81,6 +81,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\File Extractor GUI\NativeTools\BrxRebuilder;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -96,6 +97,7 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\File Extractor GUI\NativeTools\BrxRebuilder;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -109,6 +111,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\File Extractor GUI\NativeTools\BrxRebuilder;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -124,6 +127,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\File Extractor GUI\NativeTools\BrxRebuilder;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <!-- Static C++ runtime: the extractor runs from the installer on PCs
            without the Visual C++ redistributable. -->
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -138,6 +142,15 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <!-- PCBRX level rebuilder (shared with the File Extractor GUI). -->
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\AssetWalker.cpp" />
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\BinaryInputStream.cpp" />
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\BrxWalker.cpp" />
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\GeometryWalker.cpp" />
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\ObjectWalker.cpp" />
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\OptionWalker.cpp" />
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\SpliceWalker.cpp" />
+    <ClCompile Include="..\File Extractor GUI\NativeTools\BrxRebuilder\TriangleList.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="DialogAudioTable.inc" />
