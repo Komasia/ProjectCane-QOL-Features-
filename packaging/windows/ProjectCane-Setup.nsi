@@ -20,12 +20,12 @@ RequestExecutionLevel user
   !define SRC     "${ROOT}/x64/Release"   ; folder holding the built game exe and runtime DLLs
 !endif
 !ifndef VERSION
-  !define VERSION "0.4.0-beta.1"
+  !define VERSION "0.5.0-beta"
 !endif
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
 Name "${APPNAME} - Sly Cooper and the Thievius Raccoonus"
-VIProductVersion "0.4.0.1"
+VIProductVersion "0.5.0.0"
 VIAddVersionKey "ProductName" "ProjectCane"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileDescription" "ProjectCane installer"
@@ -181,6 +181,13 @@ Section "ProjectCane (required)" SecGame
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
 
   ; Extract the game data from the user's ISO
+  ; Game files from ProjectCane 0.4 and older are in the old level format and
+  ; have no extraction_manifest.json. They can't be kept, so extract anyway.
+  ${If} $SkipExtract == ${BST_CHECKED}
+  ${AndIfNot} ${FileExists} "$INSTDIR\extraction_manifest.json"
+    MessageBox MB_OK|MB_ICONINFORMATION "Your existing game files are from an older ProjectCane and can't be used by this version.$\r$\n$\r$\nThey will be extracted again from your ISO." /SD IDOK
+    StrCpy $SkipExtract ${BST_UNCHECKED}
+  ${EndIf}
   ${If} $SkipExtract == ${BST_CHECKED}
     DetailPrint "Skipping game file extraction."
   ${Else}
@@ -190,7 +197,7 @@ Section "ProjectCane (required)" SecGame
     nsExec::ExecToLog '"$INSTDIR\${EXTRACTOR}" "$IsoPath" --no-pause'
     Pop $0
     ${If} $0 != 0
-    ${OrIfNot} ${FileExists} "$INSTDIR\Worlds\*.*"
+    ${OrIfNot} ${FileExists} "$INSTDIR\extraction_manifest.json"
       MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Extracting the game files failed (code $0).$\r$\n$\r$\nMake sure the file is an NTSC (US) Sly Cooper and the Thievius Raccoonus disc image.$\r$\n$\r$\nRetry with another file, or Cancel to finish without game files (you can extract later from the Start menu)." IDCANCEL extract_done
       nsDialogs::SelectFileDialog open "$IsoPath" "Disc images (*.iso)|*.iso|All files (*.*)|*.*"
       Pop $1
@@ -226,6 +233,7 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\Cutscenes"
   RMDir /r "$INSTDIR\Fonts"
   RMDir /r "$INSTDIR\Docs"
+  Delete "$INSTDIR\extraction_manifest.json"
   Delete "$INSTDIR\*.log"
   Delete "$INSTDIR\imgui.ini"
 

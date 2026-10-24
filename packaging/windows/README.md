@@ -18,7 +18,8 @@ and cutscenes from it with the File Extractor.
 - Shows an ISO page:
   - a Browse button;
   - a size check;
-  - a **Skip** option for reinstalls that keep the existing game files.
+  - a **Skip** option for reinstalls that keep the existing game files (game
+    files from 0.4 and older are extracted again, because 0.5 can't load them).
 - Runs `File Extractor.exe "<iso>" --no-pause` and shows its output in the
   install log. If extraction fails, the user can pick another file or finish
   and extract later.
@@ -50,10 +51,10 @@ You can override these with `-D`:
 | Define | Default | Purpose |
 | --- | --- | --- |
 | `SRC` | `../../x64/Release` | Folder that holds the built game exe, DLLs and `Fonts\` |
-| `VERSION` | `0.4.0-beta.1` | Version shown in Apps & Features and used in the file name |
+| `VERSION` | `0.5.0-beta` | Version shown in Apps & Features and used in the file name |
 | `OUTDIR` | `.` | Where the installer is written |
 
-For example: `makensis -DSRC=../../x64/Debug -DVERSION=0.4.1 packaging\windows\ProjectCane-Setup.nsi`
+For example: `makensis -DSRC=../../x64/Debug -DVERSION=0.5.1 packaging\windows\ProjectCane-Setup.nsi`
 
 ## File Extractor command line
 
@@ -61,5 +62,8 @@ For example: `makensis -DSRC=../../x64/Debug -DVERSION=0.4.1 packaging\windows\P
 "File Extractor.exe" <path-to-iso> [--no-pause]
 ```
 
-The extractor writes `Worlds\` and `Cutscenes\` next to its own exe.
+The extractor writes `Worlds\`, `Cutscenes\` and `extraction_manifest.json`
+next to its own exe. Levels are converted to ProjectCane's PCBRX format with the
+level rebuilder from `File Extractor GUI\NativeTools\BrxRebuilder`, which is
+compiled into the extractor.
 `--no-pause` skips the "Press Enter to close" prompt.
